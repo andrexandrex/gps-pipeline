@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest==8.2.2
+pytest-mock==3.14.0
+moto[dynamodb,s3,kinesis,sns,sqs]==5.0.12

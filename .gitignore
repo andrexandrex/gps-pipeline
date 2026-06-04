@@ -1,0 +1,38 @@
+# Secrets — NUNCA subir
+.env
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# Entorno virtual local
+.venv/
+venv/
+
+# Terraform
+.terraform/
+infra/terraform/.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
+*.tfvars          # puede contener valores sensibles
+
+# Lambda build artifacts (generados por deploy_lambdas.sh)
+/build/
+
+# LocalStack persistence (grande, regenerable)
+localstack_data/
+
+# IDEs
+.idea/
+.vscode/settings.json
+*.swp

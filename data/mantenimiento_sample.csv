@@ -1,0 +1,13 @@
+equipo_id,fecha_mantenimiento,tipo_falla,descripcion,tecnico,estado
+EQ001,2024-01-15,CRITICA,Motor recalentado,Lopez Juan,RESUELTO
+EQ001,2024-02-20,CRITICA,Falla hidraulica,Lopez Juan,RESUELTO
+EQ001,2024-03-10,CRITICA,Sensor GPS dañado,Martinez Ana,PENDIENTE
+EQ001,2024-04-05,MENOR,Cambio de aceite,Lopez Juan,RESUELTO
+EQ002,2024-01-08,CRITICA,Frenos desgastados,Gomez Pedro,RESUELTO
+EQ002,2024-02-14,MENOR,Revision general,Martinez Ana,RESUELTO
+EQ003,2024-01-22,CRITICA,Transmision averiada,Lopez Juan,RESUELTO
+EQ003,2024-02-28,CRITICA,Bateria descargada,Gomez Pedro,RESUELTO
+EQ003,2024-03-15,CRITICA,Falla electrica,Martinez Ana,EN_PROCESO
+EQ003,2024-04-01,MENOR,Limpieza filtros,Lopez Juan,RESUELTO
+EQ004,2024-02-10,MENOR,Calibracion sensores,Martinez Ana,RESUELTO
+EQ005,2024-01-30,CRITICA,Neumatico pinchado,Gomez Pedro,RESUELTO
