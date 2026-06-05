@@ -43,32 +43,8 @@ services:
     networks:
       - gps-net
 
-  dashboard:
-    build:
-      context: .
-      dockerfile: Dockerfile.dev
-    container_name: gps-dashboard
-    ports:
-      - "8501:8501"
-    environment:
-      - AWS_ACCESS_KEY_ID=test
-      - AWS_SECRET_ACCESS_KEY=test
-      - AWS_DEFAULT_REGION=us-east-1
-      - AWS_ENDPOINT_URL=http://localstack:4566
-      - SILVER_BUCKET=gps-silver
-      - GOLD_BUCKET=gps-gold
-      - DYNAMO_TABLE_NAME=gps-last-seen
-      - SIGNAL_LOSS_THRESHOLD_MINUTES=10
-      - PYTHONPATH=/app/src:/app/src/lambdas
-    depends_on:
-      localstack:
-        condition: service_healthy
-    volumes:
-      - ".:/app"
-    command: ["streamlit", "run", "src/dashboard/app.py",
-              "--server.address=0.0.0.0", "--server.port=8501"]
-    networks:
-      - gps-net
+# Dashboard runs locally via: make dashboard
+# (not as Docker container — faster startup, uses .venv Python directly)
 
 volumes:
   localstack_data:
