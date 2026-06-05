@@ -265,10 +265,14 @@ def main():
         print(f"\n{'─'*52}")
         print("[+] Detección de pérdida de señal...")
         s = step_signal_loss()
-        if s["lost"] == 0:
-            print("  ✓ Todos los equipos con señal reciente")
+        alert_n = s.get("alert_lost", s.get("lost", 0))
+        maint_n = s.get("maint_created", 0)
+        if alert_n == 0:
+            print("  ✓ Todos los equipos con señal reciente (sin alertas)")
         else:
-            print(f"  ⚠ {s['lost']} equipo(s) sin señal: {s['equipos']}")
+            print(f"  ⚠ {alert_n} equipo(s) con alerta (>{os.getenv('SIGNAL_LOSS_THRESHOLD_MINUTES','10')} min): {s.get('equipos', [])}")
+        if maint_n > 0:
+            print(f"  🤖 {maint_n} registro(s) de mantenimiento auto-creado(s) en silver/")
 
     # ── Summary ────────────────────────────────────────────────────────────
     print(f"\n{'═'*52}")
