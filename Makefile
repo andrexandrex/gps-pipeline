@@ -9,7 +9,7 @@ STREAMLIT = .venv/bin/streamlit
 ENV      = env $$(cat .env | grep -v '^\#' | xargs)
 PYPATH   = PYTHONPATH=src:src/lambdas
 
-.PHONY: up down status logs setup pipeline dashboard test test-unit clean help
+.PHONY: up down bootstrap status logs setup pipeline pipeline-gps pipeline-batch pipeline-quality sql dashboard test test-unit clean help
 
 ## ── Infrastructure ──────────────────────────────────────────────────────────
 
