@@ -10,6 +10,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # awslocal CLI wrapper (thin shim over aws-cli pointing to LocalStack)
 RUN pip install --no-cache-dir awscli-local
 
+# awslocal CLI wrapper (thin shim over aws-cli pointing to LocalStack)
+RUN pip install --no-cache-dir awscli-local
+
 COPY . .
 
 ENV PYTHONUNBUFFERED=1
