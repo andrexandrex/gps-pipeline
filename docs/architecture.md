@@ -1,106 +1,160 @@
-# Arquitectura GPS Pipeline
+# GPS Pipeline — Arquitectura
 
 ## Diagrama
 
 ```mermaid
 flowchart TD
-    subgraph SOURCES["Fuentes de datos"]
-        SIM["🚛 Simulador GPS\n(producer/simulator.py)\nEquipos cada 30s"]
-        CSV["📄 CSV Mantenimiento\nUpload manual / SFTP"]
+    subgraph SOURCES["📡 Fuentes de datos"]
+        SIM["🚛 Simulador GPS\nCAM_001 … CAM_010\nevento cada 30s"]
+        CSV["📄 CSV Mantenimiento\ncarga manual"]
     end
 
-    subgraph STREAMING["Camino Streaming — tiempo real"]
-        direction TB
-        KDS["Amazon Kinesis\nData Streams\ngps-eventos\n2 shards"]
-        VLAMBDA["λ validate_gps\nValidación coords,\ntimestamp, duplicados\n(equipo_id+ts)"]
-        DLQ["SQS DLQ\ngps-validate-dlq\nregistros inválidos"]
-        DYNAMO["DynamoDB\ngps-last-seen\nÚltimo timestamp\npor equipo_id"]
-        SLAMBDA["λ detect_signal_loss\nEventBridge cada 5 min\nCompara now() vs last_seen"]
-        SNS["SNS\ngps-alertas\nAlerta pérdida >10 min"]
-        BRONZE_GPS["S3 Bronze\ngps-bronze/bronze_rejected/\nregistros inválidos\n(NDJSON)"]
+    subgraph STREAMING["⚡ Tiempo real"]
+        SQS["SQS Queue\ngps-eventos\nbuffer de mensajes"]
+        VALIDATE["λ validate_gps\n① coords en Áncash\n② sin duplicados\n③ timestamp reciente"]
+        DYNAMO["DynamoDB\ngps-last-seen\n¿cuándo fue el último ping?"]
+        DETECT["λ detect_signal_loss\ncada 5 min\n>10 min sin señal → alerta"]
+        SNS["SNS\ngps-alertas\n📧 notificación"]
+        DLQ["SQS DLQ\nregistros que fallaron\ntodos los reintentos"]
     end
 
-    subgraph BATCH["Camino Batch — diario"]
-        direction TB
-        BRONZE_MANT["S3 Bronze\ngps-bronze/mantenimientos/\nCSV raw"]
-        GLUE["AWS Glue Job\n(o Lambda batch)\nParseo, normalización\ntipo_falla, fechas"]
-        SILVER_MANT["S3 Silver\ngps-silver/mantenimientos/\nParquet limpio"]
+    subgraph STORAGE["🗄️ Almacenamiento S3 — Medallion"]
+        BRONZE["Bronze\ndatos raw + rechazados\nCSV y NDJSON"]
+        SILVER["Silver\ndatos limpios\nParquet comprimido"]
+        GOLD["Gold\nmétricas de calidad\nJSON + Parquet"]
     end
 
-    subgraph QUALITY["Calidad de datos"]
-        PANDERA["λ / Glue Quality\nPandera schemas\n% completitud\n% duplicados\n% fuera de rango"]
-        GOLD["S3 Gold\ngps-gold/quality_metrics/\nMétricas DQ"]
+    subgraph QUALITY["✅ Calidad"]
+        PANDERA["Pandera\n% válidos\n% duplicados\n% fuera de rango"]
     end
 
-    subgraph ANALYTICS["Capa analítica"]
-        SILVER_GPS["S3 Silver\ngps-silver/gps_eventos/\nParquet validado"]
-        GLUE_CAT["AWS Glue Data Catalog\nTablas: gps_eventos\nmantenimientos"]
-        ATHENA["Amazon Athena\nSQL — equipos con\n>3 fallas críticas\nestado OK / SIN_SEÑAL"]
-        QS["Amazon QuickSight\nDashboard operacional"]
+    subgraph ANALYTICS["📊 Análisis"]
+        CATALOG["Glue Data Catalog\ntablas: gps_eventos\nmantenimientos"]
+        ATHENA["Athena SQL\nequipos con >3 fallas\nOK vs SIN_SEÑAL"]
+        DASH["Streamlit\nDashboard en vivo\nEC2 t3.micro"]
     end
 
-    subgraph OBS["Observabilidad"]
-        CW["CloudWatch\nAlarmas: Lambda errors\nIteratorAge > 60s\nDLQ depth > 0"]
+    subgraph OBS["🔔 Monitoreo"]
+        CW["CloudWatch Alarms\nerrores Lambda\nDLQ depth > 0\nmensajes > 60s"]
     end
 
-    %% Streaming flow
-    SIM -->|"PutRecord boto3\n(latitud/longitud/velocidad)"| KDS
-    KDS -->|"Event source mapping"| VLAMBDA
-    VLAMBDA -->|"Válido → Parquet directo"| SILVER_GPS
-    VLAMBDA -->|"Inválido → NDJSON"| BRONZE_GPS
-    VLAMBDA -->|"Inválido → DLQ"| DLQ
-    VLAMBDA -->|"UpdateItem last_seen"| DYNAMO
-    SILVER_GPS --> GLUE_CAT
+    %% Streaming
+    SIM -->|"JSON: latitud, longitud\nvelocidad, estado"| SQS
+    SQS -->|"trigger automático"| VALIDATE
+    VALIDATE -->|"válido → Parquet"| SILVER
+    VALIDATE -->|"inválido → NDJSON"| BRONZE
+    VALIDATE -->|"inválido → reintentos"| DLQ
+    VALIDATE -->|"actualiza last_seen"| DYNAMO
+    DYNAMO --> DETECT
+    DETECT -->|">10 min sin señal"| SNS
 
-    %% Signal loss detection
-    DYNAMO -->|"Scan equipos"| SLAMBDA
-    SLAMBDA -->|"Publish alert"| SNS
-
-    %% Batch flow
-    CSV -->|"s3 cp / evento PutObject"| BRONZE_MANT
-    BRONZE_MANT -->|"EventBridge S3 trigger"| GLUE
-    GLUE --> SILVER_MANT
-    SILVER_MANT --> GLUE_CAT
+    %% Batch
+    CSV -->|"s3 cp"| BRONZE
+    BRONZE -->|"S3 trigger → Lambda"| SILVER
 
     %% Quality
-    SILVER_GPS --> PANDERA
-    SILVER_MANT --> PANDERA
+    SILVER --> PANDERA
     PANDERA --> GOLD
 
     %% Analytics
-    GLUE_CAT --> ATHENA
-    ATHENA --> QS
+    SILVER --> CATALOG
+    CATALOG --> ATHENA
+    ATHENA --> DASH
+    SILVER --> DASH
+    DYNAMO --> DASH
 
     %% Observability
-    VLAMBDA -.->|"métricas"| CW
-    SLAMBDA -.->|"métricas"| CW
-    KDS -.->|"IteratorAge"| CW
+    VALIDATE -.->|"métricas"| CW
+    DETECT -.->|"métricas"| CW
+    DLQ -.->|"profundidad"| CW
 
-    %% Styles
     classDef lambda fill:#FF9900,color:#000,stroke:#c47000
     classDef storage fill:#3F8624,color:#fff,stroke:#2d6318
-    classDef streaming fill:#8C4FFF,color:#fff,stroke:#6a3acc
+    classDef queue fill:#8C4FFF,color:#fff,stroke:#6a3acc
     classDef analytics fill:#1A73E8,color:#fff,stroke:#1558b0
     classDef alert fill:#DD344C,color:#fff,stroke:#b02039
 
-    class VLAMBDA,SLAMBDA,PANDERA lambda
-    class BRONZE_GPS,BRONZE_MANT,SILVER_GPS,SILVER_MANT,GOLD storage
-    class KDS,DLQ streaming
-    class GLUE_CAT,ATHENA,QS analytics
+    class VALIDATE,DETECT,PANDERA lambda
+    class BRONZE,SILVER,GOLD storage
+    class SQS,DLQ queue
+    class CATALOG,ATHENA,DASH analytics
     class SNS,CW alert
 ```
 
 ---
 
-## Flujo streaming (tiempo real)
+## Cómo fluyen los datos
 
-El simulador GPS (`src/producer/simulator.py`) publica eventos JSON cada ~30 segundos por equipo hacia **Kinesis Data Streams** (`gps-eventos`, 2 shards), usando `equipo_id` como partition key para garantizar orden por dispositivo. Kinesis activa la Lambda `validate_gps` mediante un *event source mapping* con batch size configurable (recomendado: 100 registros, ventana 10 s): esta función valida coordenadas (latitud −90/90, longitud −180/180), rechaza timestamps futuros o con antigüedad >1 hora, y detecta duplicados consultando DynamoDB por la clave `equipo_id + timestamp`. Los registros válidos se escriben en S3 Bronze vía Kinesis Firehose (Parquet, compresión Snappy, particiones `yyyy/mm/dd/hh`) y se actualiza el campo `last_seen` en DynamoDB. Los registros inválidos se envían a la SQS DLQ para auditoría sin perder el mensaje. Una segunda Lambda, `detect_signal_loss`, se ejecuta cada 5 minutos a través de **EventBridge Scheduler**; escanea la tabla DynamoDB, calcula `now() − last_seen` por equipo, y publica una alerta en **SNS** (`gps-alertas`) por cada equipo que supere los 10 minutos sin señal. CloudWatch monitorea errores de Lambda, profundidad de DLQ e `IteratorAge` del stream (métrica crítica: si sube indica que el consumidor no está al día).
+### 1. Tiempo real — GPS
 
-## Flujo batch (diario)
+Cada 30 segundos, el simulador genera un evento por vehículo (`equipo_id`, coordenadas, velocidad, estado) y lo envía a una cola **SQS**. La Lambda `validate_gps` lee esa cola automáticamente y hace tres chequeos:
 
-Los archivos CSV de mantenimiento se depositan en `s3://gps-bronze/mantenimientos/` (carga manual, SFTP, o proceso externo). Un evento **S3 PutObject** dispara automáticamente el job de **AWS Glue** (o una Lambda para volúmenes pequeños, ver nota de diseño abajo), que lee el CSV raw, normaliza los campos (`tipo_falla` → enum `CRITICA/MENOR`, fechas ISO-8601, `equipo_id` en mayúsculas), y escribe Parquet particionado por `fecha_mantenimiento` en `s3://gps-silver/mantenimientos/`. El **Glue Data Catalog** mantiene las definiciones de tabla para ambas capas silver (`gps_eventos` y `mantenimientos`), lo que permite a **Athena** consultarlas con SQL estándar sin mover datos. La capa gold recibe las métricas de calidad calculadas por el módulo Pandera: porcentaje de completitud, duplicados y valores fuera de rango, escritas en JSON/Parquet para trazabilidad. **QuickSight** se conecta directamente a Athena para el dashboard operacional.
+- **¿Están las coordenadas dentro de Áncash?** Caja: lat −10.5/−7.8, lon −78.5/−76.5
+- **¿Es el timestamp reciente?** Rechaza futuros y registros con más de 1 hora de antigüedad
+- **¿Es un duplicado?** DynamoDB con TTL de 24h evita procesar el mismo evento dos veces
+
+Registros válidos → Parquet comprimido en **S3 Silver**.
+Registros inválidos → NDJSON en **S3 Bronze** + **DLQ** para auditoría.
+Cada evento válido actualiza `last_seen` en DynamoDB.
+
+### 2. Detección de pérdida de señal
+
+Cada 5 minutos, **EventBridge** dispara la Lambda `detect_signal_loss`. Esta escanea DynamoDB y calcula cuánto tiempo lleva sin señal cada equipo:
+
+- **> 10 minutos** → publica alerta en SNS (email/SMS)
+- **> 30 minutos** → crea automáticamente un registro de mantenimiento en S3 (falla GPS)
+
+### 3. Batch — CSV de mantenimiento
+
+Cuando un archivo CSV cae en `s3://gps-bronze/mantenimientos/`, S3 dispara automáticamente la Lambda `ingest_maintenance`. Esta normaliza los campos (fechas ISO-8601, criticidad ALTA/MEDIA/BAJA, limpieza de texto) y escribe Parquet limpio en S3 Silver.
+
+### 4. Calidad de datos
+
+El módulo **Pandera** valida los DataFrames de Silver y calcula métricas: porcentaje de registros válidos, duplicados y valores fuera de rango. Los resultados se escriben en **S3 Gold** para trazabilidad histórica.
+
+### 5. Dashboard
+
+**Streamlit** (corriendo en EC2 t3.micro) lee directamente de S3, DynamoDB y SQS para mostrar cuatro vistas:
+
+| Tab | Qué muestra |
+|---|---|
+| 📡 Estado GPS | Tabla de equipos — último ping, minutos sin señal, alertas rojas si >10 min |
+| 🔧 Mantenimientos | Historial de fallas, equipos con >3 fallas ALTA, análisis por criticidad |
+| 📊 Calidad | Métricas Pandera en el tiempo — % válidos, duplicados, completitud |
+| ⚙️ Robustez | DLQ depth, registros rechazados, estrategia de retry, logs, alarmas CloudWatch |
 
 ---
 
-> **Nota de diseño — Glue vs Lambda para batch:**
-> Se elige Glue porque escala horizontalmente con DPUs y tiene integración nativa con el Catalog. La alternativa Lambda+Pandas es más barata para archivos <128 MB y latencia <15 min, pero tiene límite de memoria (10 GB) y no tiene checkpointing automático. Para este caso con CSVs diarios de tamaño moderado, ambas son válidas; Glue se defiende mejor ante crecimiento de volumen.
+## Decisiones de diseño clave
+
+| Decisión | Por qué |
+|---|---|
+| SQS en lugar de Kinesis | Kinesis requiere suscripción de cuenta; SQS es universalmente disponible y funcionalmente equivalente para este volumen |
+| DynamoDB para dedup | Escritura condicional `attribute_not_exists` — idempotente por naturaleza, sin locks |
+| Parquet + Snappy | 5–10× más compacto que CSV, lectura columnar, compatible con Athena sin configuración extra |
+| Lambda + S3 trigger para batch | Más barato y simple que Glue para CSVs de tamaño moderado (<128 MB); Glue se justifica a partir de GBs |
+| Pandera `lazy=True` | Recoge todos los errores de validación en un solo paso — no falla al primer error |
+
+---
+
+## Infraestructura
+
+```
+AWS Account 150465626929 / us-east-1
+├── SQS          gps-eventos (GPS events queue)
+├── SQS          gps-validate-dlq (dead-letter queue)
+├── Lambda       validate_gps       (triggered by SQS)
+├── Lambda       detect_signal_loss (triggered by EventBridge every 5 min)
+├── Lambda       ingest_maintenance (triggered by S3 PutObject)
+├── DynamoDB     gps-last-seen      (last ping per device)
+├── DynamoDB     gps-dedup          (deduplication, TTL 24h)
+├── S3           gps-bronze-<account>   (raw + rejected)
+├── S3           gps-silver-<account>   (clean Parquet)
+├── S3           gps-gold-<account>     (quality metrics)
+├── SNS          gps-alertas        (signal loss alerts)
+├── EC2          t3.micro           (Streamlit dashboard)
+└── CloudWatch   5 alarms           (Lambda errors, DLQ, message age, duration)
+
+Local (LocalStack):
+└── Identical structure, bucket names without -<account> suffix
+```
