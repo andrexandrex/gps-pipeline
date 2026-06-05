@@ -17,6 +17,14 @@ variable "aws_region" {
   default = "us-east-1"
 }
 
+# Pass your real account ID when deploying to AWS to avoid an STS lookup.
+# Defaults to LocalStack's fixed account ID; override with:
+#   terraform apply -var="aws_account_id=150465626929"
+variable "aws_account_id" {
+  default     = "000000000000"
+  description = "AWS Account ID. LocalStack default is 000000000000."
+}
+
 locals {
   endpoint = var.use_localstack ? "http://localhost:4566" : null
 }
@@ -32,15 +40,18 @@ provider "aws" {
   dynamic "endpoints" {
     for_each = var.use_localstack ? [1] : []
     content {
-      s3       = local.endpoint
-      kinesis  = local.endpoint
-      dynamodb = local.endpoint
-      sns      = local.endpoint
-      sqs      = local.endpoint
-      lambda   = local.endpoint
-      iam      = local.endpoint
-      firehose = local.endpoint
-      glue     = local.endpoint
+      s3          = local.endpoint
+      kinesis     = local.endpoint
+      dynamodb    = local.endpoint
+      sns         = local.endpoint
+      sqs         = local.endpoint
+      lambda      = local.endpoint
+      iam         = local.endpoint
+      firehose    = local.endpoint
+      glue        = local.endpoint
+      sts         = local.endpoint   # needed for data.aws_caller_identity
+      cloudwatch  = local.endpoint
+      events      = local.endpoint
     }
   }
 }
