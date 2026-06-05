@@ -28,7 +28,6 @@ _kw = dict(endpoint_url=EP, region_name=REGION,
 def dynamo():
     return boto3.client("dynamodb", **_kw)
 
-
 @pytest.fixture(scope="session")
 def s3():
     return boto3.client("s3", **_kw)

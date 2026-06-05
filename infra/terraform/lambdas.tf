@@ -134,3 +134,53 @@ resource "aws_lambda_permission" "allow_eventbridge" {
   principal     = "events.amazonaws.com"
   source_arn    = aws_cloudwatch_event_rule.signal_loss_schedule.arn
 }
+
+# ── Lambda: ingest_maintenance ────────────────────────────────────────────────
+data "archive_file" "ingest_maintenance_zip" {
+  type        = "zip"
+  source_dir  = "${path.module}/../../src/batch"
+  output_path = "${path.module}/../../build/ingest_maintenance.zip"
+}
+
+resource "aws_lambda_function" "ingest_maintenance" {
+  function_name    = "ingest_maintenance"
+  role             = aws_iam_role.lambda_gps.arn
+  handler          = "ingest_maintenance.handler"
+  runtime          = "python3.12"
+  filename         = data.archive_file.ingest_maintenance_zip.output_path
+  source_code_hash = data.archive_file.ingest_maintenance_zip.output_base64sha256
+  timeout          = 120   # CSV parsing can take longer than GPS validation
+  memory_size      = 512   # pandas + pyarrow benefit from extra memory
+
+  environment {
+    variables = {
+      AWS_ENDPOINT_URL = var.use_localstack ? "http://localstack:4566" : ""
+      SILVER_BUCKET    = aws_s3_bucket.silver.bucket
+      BRONZE_BUCKET    = aws_s3_bucket.bronze.bucket
+      LOG_LEVEL        = "INFO"
+    }
+  }
+}
+
+# Allow S3 to invoke the Lambda when a CSV lands in bronze/mantenimientos/
+resource "aws_lambda_permission" "allow_s3_ingest" {
+  statement_id  = "AllowS3Invoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.ingest_maintenance.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = aws_s3_bucket.bronze.arn
+}
+
+# S3 event notification: bronze bucket PutObject in mantenimientos/ → Lambda
+resource "aws_s3_bucket_notification" "bronze_csv_trigger" {
+  bucket = aws_s3_bucket.bronze.id
+
+  lambda_function {
+    lambda_function_arn = aws_lambda_function.ingest_maintenance.arn
+    events              = ["s3:ObjectCreated:*"]
+    filter_prefix       = "mantenimientos/"
+    filter_suffix       = ".csv"
+  }
+
+  depends_on = [aws_lambda_permission.allow_s3_ingest]
+}

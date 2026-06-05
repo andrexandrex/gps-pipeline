@@ -59,4 +59,59 @@ for PREFIX in bronze/gps_eventos/ bronze/mantenimientos/ silver/gps_eventos/ sil
   aws s3api put-object --bucket gps-bronze --key "${PREFIX}.keep" $EP --no-cli-pager 2>/dev/null || true
 done
 
+echo "[bootstrap] Creating Glue database and catalog tables..."
+aws glue create-database \
+  --database-input '{"Name":"gps_pipeline","Description":"GPS Pipeline Ancash Peru"}' \
+  --region "$REGION" $EP --no-cli-pager 2>/dev/null || echo "  gps_pipeline db already exists"
+
+# gps_eventos table — points to silver/gps_eventos/
+aws glue create-table \
+  --database-name gps_pipeline \
+  --table-input '{
+    "Name": "gps_eventos",
+    "StorageDescriptor": {
+      "Columns": [
+        {"Name":"equipo_id","Type":"string"},
+        {"Name":"latitude","Type":"double"},
+        {"Name":"longitude","Type":"double"},
+        {"Name":"timestamp","Type":"string"},
+        {"Name":"speed_kmh","Type":"double"},
+        {"Name":"heading","Type":"double"}
+      ],
+      "Location": "s3://gps-silver/gps_eventos/",
+      "InputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
+      "OutputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
+      "SerdeInfo": {"SerializationLibrary":"org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"}
+    },
+    "PartitionKeys": [
+      {"Name":"year","Type":"int"},{"Name":"month","Type":"int"},
+      {"Name":"day","Type":"int"},{"Name":"hour","Type":"int"}
+    ],
+    "TableType": "EXTERNAL_TABLE"
+  }' \
+  --region "$REGION" $EP --no-cli-pager 2>/dev/null || echo "  gps_eventos table already exists"
+
+# mantenimientos table — points to silver/mantenimientos/
+aws glue create-table \
+  --database-name gps_pipeline \
+  --table-input '{
+    "Name": "mantenimientos",
+    "StorageDescriptor": {
+      "Columns": [
+        {"Name":"equipo_id","Type":"string"},
+        {"Name":"fecha_mantenimiento","Type":"string"},
+        {"Name":"tipo_falla","Type":"string"},
+        {"Name":"descripcion","Type":"string"},
+        {"Name":"tecnico","Type":"string"},
+        {"Name":"estado","Type":"string"}
+      ],
+      "Location": "s3://gps-silver/mantenimientos/",
+      "InputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
+      "OutputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
+      "SerdeInfo": {"SerializationLibrary":"org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"}
+    },
+    "TableType": "EXTERNAL_TABLE"
+  }' \
+  --region "$REGION" $EP --no-cli-pager 2>/dev/null || echo "  mantenimientos table already exists"
+
 echo "[bootstrap] Done. Resources ready on ${AWS_ENDPOINT_URL:-http://localhost:4566}"
