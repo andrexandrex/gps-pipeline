@@ -1,15 +1,12 @@
 """
 GPS Pipeline — Streamlit Dashboard
-Local alternative to QuickSight; reads directly from LocalStack S3 + DynamoDB.
+Reads from LocalStack S3 + DynamoDB. No computation happens here — it only
+visualises what run_pipeline.py or the Lambda functions already wrote.
 
-Run:
+How to start:
+    env $(cat .env | grep -v '^#' | xargs) \\
+    PYTHONPATH=src:src/lambdas \\
     streamlit run src/dashboard/app.py
-
-Env vars (same as the rest of the pipeline):
-    AWS_ENDPOINT_URL=http://localhost:4566
-    SILVER_BUCKET=gps-silver
-    GOLD_BUCKET=gps-gold
-    DYNAMO_TABLE_NAME=gps-last-seen
 """
 
 import io
@@ -24,47 +21,67 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── AWS clients ───────────────────────────────────────────────────────────────
 _ep = os.getenv("AWS_ENDPOINT_URL")
 _kw = {"endpoint_url": _ep} if _ep else {}
+
+SILVER        = os.getenv("SILVER_BUCKET",                 "gps-silver")
+GOLD          = os.getenv("GOLD_BUCKET",                   "gps-gold")
+DYNAMO        = os.getenv("DYNAMO_TABLE_NAME",             "gps-last-seen")
+ALERT_MIN     = int(os.getenv("SIGNAL_LOSS_THRESHOLD_MINUTES",        "10"))
+MAINT_MIN     = int(os.getenv("AUTO_MAINTENANCE_THRESHOLD_MINUTES",   "30"))
+ENV_LABEL     = f"`{_ep}`" if _ep else "**AWS real**"
+
 
 @st.cache_resource
 def _s3():
     return boto3.client("s3", **_kw)
 
 @st.cache_resource
-def _dynamo():
+def _dynamo_client():
     return boto3.client("dynamodb", **_kw)
 
-SILVER = os.getenv("SILVER_BUCKET", "gps-silver")
-GOLD   = os.getenv("GOLD_BUCKET",   "gps-gold")
-DYNAMO = os.getenv("DYNAMO_TABLE_NAME", "gps-last-seen")
-THRESHOLD_MIN = int(os.getenv("SIGNAL_LOSS_THRESHOLD_MINUTES", "10"))
 
-# ── Data loaders ──────────────────────────────────────────────────────────────
+# ── Data loaders (cached 30 s) ────────────────────────────────────────────────
 
 @st.cache_data(ttl=30)
-def load_quality_metrics(dataset: str) -> list[dict]:
-    """Read all JSON quality metric files for a dataset from gold/."""
+def load_quality_runs(dataset: str) -> pd.DataFrame:
+    """
+    Returns one row per quality run, sorted by timestamp.
+    'total_rows' = how many rows were in silver when the check ran.
+    This number grows over time as more data accumulates — that's normal.
+    """
     prefix = f"quality_metrics/{dataset}/"
     try:
         resp = _s3().list_objects_v2(Bucket=GOLD, Prefix=prefix)
     except Exception:
-        return []
-    items = []
+        return pd.DataFrame()
+
+    rows = []
     for obj in resp.get("Contents", []):
-        if obj["Key"].endswith(".json"):
-            try:
-                body = _s3().get_object(Bucket=GOLD, Key=obj["Key"])["Body"].read()
-                items.append(json.loads(body))
-            except Exception:
-                pass
-    return sorted(items, key=lambda x: x.get("run_timestamp", ""))
+        if not obj["Key"].endswith(".json"):
+            continue
+        try:
+            body = _s3().get_object(Bucket=GOLD, Key=obj["Key"])["Body"].read()
+            m = json.loads(body)
+            completeness = m.get("completeness_pct", {})
+            rows.append({
+                "Fecha/hora del check":      m.get("run_timestamp", "")[:19].replace("T", " "),
+                "Registros en silver":       m.get("total_rows", 0),
+                "% válidos":                 round(m.get("valid_pct", 0), 1),
+                "% duplicados":              round(m.get("duplicates_pct", 0), 1),
+                "Filas con error Pandera":   m.get("pandera_failures", 0),
+                "Completitud mín (%)":       round(min(completeness.values(), default=100), 1),
+                "_out_of_range":             m.get("out_of_range_pct", {}),
+                "_completeness":             completeness,
+            })
+        except Exception:
+            pass
+
+    return pd.DataFrame(rows).sort_values("Fecha/hora del check") if rows else pd.DataFrame()
 
 
 @st.cache_data(ttl=30)
 def load_silver_parquet(prefix: str) -> pd.DataFrame:
-    """Read all Parquet files from silver/ under a given prefix."""
     try:
         paginator = _s3().get_paginator("list_objects_v2")
         frames = []
@@ -78,151 +95,301 @@ def load_silver_parquet(prefix: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=15)
 def load_equipment_status() -> pd.DataFrame:
-    """Scan gps-last-seen DynamoDB and compute signal status per device."""
     try:
-        paginator = _dynamo().get_paginator("scan")
+        paginator = _dynamo_client().get_paginator("scan")
         rows = []
         for page in paginator.paginate(TableName=DYNAMO):
             for item in page.get("Items", []):
-                equipo_id   = item.get("equipo_id", {}).get("S", "")
-                last_seen_s = item.get("last_seen",  {}).get("S", "")
-                if last_seen_s:
+                eid  = item.get("equipo_id", {}).get("S", "")
+                seen = item.get("last_seen",  {}).get("S", "")
+                if seen:
                     try:
-                        last_dt = datetime.fromisoformat(last_seen_s)
-                        if last_dt.tzinfo is None:
-                            last_dt = last_dt.replace(tzinfo=timezone.utc)
-                        mins = round((datetime.now(timezone.utc) - last_dt).total_seconds() / 60, 1)
-                        status = "🟢 OK" if mins <= THRESHOLD_MIN else "🔴 SIN SEÑAL"
+                        dt = datetime.fromisoformat(seen)
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        mins = round((datetime.now(timezone.utc) - dt).total_seconds() / 60, 1)
+                        if mins <= ALERT_MIN:
+                            estado, icono = "OK", "🟢"
+                        elif mins <= MAINT_MIN:
+                            estado, icono = "ALERTA", "🟡"
+                        else:
+                            estado, icono = "SIN SEÑAL", "🔴"
                     except ValueError:
-                        mins, status = None, "⚠️ DATO INVÁLIDO"
+                        mins, estado, icono = None, "DATO INVÁLIDO", "⚠️"
                 else:
-                    mins, status = None, "⚠️ SIN REGISTRO"
-                rows.append({"equipo_id": equipo_id, "last_seen": last_seen_s,
-                             "minutos_sin_señal": mins, "estado": status})
-        return pd.DataFrame(rows)
+                    mins, estado, icono = None, "SIN REGISTRO", "⚠️"
+                rows.append({
+                    "Equipo":              eid,
+                    "Última señal GPS":    seen[:19].replace("T", " ") if seen else "—",
+                    "Min sin señal":       mins,
+                    "Estado":             f"{icono} {estado}",
+                })
+        df = pd.DataFrame(rows)
+        return df.sort_values("Min sin señal", ascending=False, na_position="last") if not df.empty else df
     except Exception:
         return pd.DataFrame()
 
 
-# ── Page layout ───────────────────────────────────────────────────────────────
+# ── Layout ────────────────────────────────────────────────────────────────────
 
-st.set_page_config(
-    page_title="GPS Pipeline — Dashboard",
-    page_icon="🚛",
-    layout="wide",
-)
+st.set_page_config(page_title="GPS Pipeline — Áncash, Perú", page_icon="🚛", layout="wide")
 
 st.title("🚛 GPS Pipeline — Áncash, Perú")
-st.caption(f"LocalStack endpoint: `{_ep or 'AWS real'}`  |  Threshold señal: {THRESHOLD_MIN} min")
 
-tab_quality, tab_status, tab_maintenance = st.tabs([
-    "📊 Calidad de Datos",
+connected = "🟢 LocalStack" if _ep else "🔴 AWS real (sin LocalStack)"
+st.caption(
+    f"Conexión: {connected} {ENV_LABEL}  |  "
+    f"Alerta señal: **{ALERT_MIN} min**  |  Auto-mantenimiento: **{MAINT_MIN} min**  |  "
+    f"Datos en S3 se actualizan cada 30 s — pulsa 🔄 para forzar"
+)
+
+if st.button("🔄 Refrescar datos"):
+    st.cache_data.clear()
+    st.rerun()
+
+tab_status, tab_quality, tab_maintenance = st.tabs([
     "📡 Estado de Equipos",
+    "📊 Calidad de Datos",
     "🔧 Mantenimientos",
 ])
 
-# ── TAB 1: Quality metrics ────────────────────────────────────────────────────
-with tab_quality:
-    st.subheader("Métricas de calidad — último run")
-    dataset_sel = st.radio("Dataset", ["gps_eventos", "mantenimientos"], horizontal=True)
-    metrics_list = load_quality_metrics(dataset_sel)
 
-    if not metrics_list:
-        st.info("No hay métricas en gold/ todavía. Corre el quality_checker Lambda o el script de calidad.")
-    else:
-        latest = metrics_list[-1]
-
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total filas",    latest.get("total_rows", 0))
-        col2.metric("Válidas %",      f"{latest.get('valid_pct', 0):.1f}%")
-        col3.metric("Duplicados %",   f"{latest.get('duplicates_pct', 0):.1f}%")
-        col4.metric("Timestamp",      latest.get("run_timestamp", "")[:19])
-
-        # Completeness bar chart
-        completeness = latest.get("completeness_pct", {})
-        if completeness:
-            st.subheader("Completitud por columna (%)")
-            st.bar_chart(
-                pd.DataFrame.from_dict(completeness, orient="index", columns=["completitud_%"])
-            )
-
-        # Out-of-range
-        oor = latest.get("out_of_range_pct", {})
-        if oor:
-            st.subheader("Fuera de rango por columna (%)")
-            st.bar_chart(
-                pd.DataFrame.from_dict(oor, orient="index", columns=["fuera_de_rango_%"])
-            )
-
-        # History table
-        if len(metrics_list) > 1:
-            st.subheader("Histórico de runs")
-            hist_df = pd.DataFrame([{
-                "timestamp":    m.get("run_timestamp", "")[:19],
-                "total":        m.get("total_rows", 0),
-                "válidas_%":    m.get("valid_pct", 0),
-                "duplicados_%": m.get("duplicates_pct", 0),
-                "failures":     m.get("pandera_failures", 0),
-            } for m in metrics_list])
-            st.dataframe(hist_df, use_container_width=True)
-
-# ── TAB 2: Equipment status ───────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════
+# TAB 1 — Estado de Equipos
+# ═════════════════════════════════════════════════════
 with tab_status:
-    st.subheader("Estado de señal GPS por equipo")
-
-    if st.button("🔄 Actualizar"):
-        st.cache_data.clear()
-
     eq_df = load_equipment_status()
-    if eq_df.empty:
-        st.info("No hay datos en DynamoDB. Corre el producer y espera unos segundos.")
-    else:
-        sin_senal = eq_df[eq_df["estado"].str.contains("SIN SEÑAL", na=False)]
-        ok        = eq_df[eq_df["estado"].str.contains("OK", na=False)]
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total equipos",  len(eq_df))
-        c2.metric("🟢 Con señal",   len(ok))
-        c3.metric("🔴 Sin señal",   len(sin_senal), delta=f"-{len(sin_senal)}", delta_color="inverse")
+    if eq_df.empty:
+        st.warning(
+            "Sin datos. Corre el pipeline primero:\n\n"
+            "```bash\n"
+            "env $(cat .env | grep -v '^#' | xargs) \\\n"
+            "PYTHONPATH=src:src/lambdas \\\n"
+            "python3 scripts/run_pipeline.py --all\n"
+            "```"
+        )
+    else:
+        ok_df     = eq_df[eq_df["Estado"].str.contains("OK")]
+        alert_df  = eq_df[eq_df["Estado"].str.contains("ALERTA")]
+        lost_df   = eq_df[eq_df["Estado"].str.contains("SIN SEÑAL")]
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total equipos rastreados", len(eq_df),
+                  help="Dispositivos que enviaron al menos un evento GPS")
+        c2.metric("🟢 Señal OK",  len(ok_df),
+                  help=f"Señal recibida en los últimos {ALERT_MIN} min")
+        c3.metric("🟡 En alerta", len(alert_df),
+                  help=f"Sin señal entre {ALERT_MIN} y {MAINT_MIN} min → alerta SNS enviada")
+        c4.metric("🔴 Sin señal", len(lost_df),
+                  help=f"Sin señal >10 min → SNS + registro automático de mantenimiento creado",
+                  delta=f"-{len(lost_df)}" if lost_df.empty else None,
+                  delta_color="inverse")
+
+        if not lost_df.empty:
+            st.error(
+                f"**{len(lost_df)} equipo(s) sin señal por más de {ALERT_MIN} min.**  "
+                f"Se creó un registro de mantenimiento automático en silver/mantenimientos/ "
+                f"para los que superan {MAINT_MIN} min:  \n"
+                + "  ".join(f"`{e}`" for e in lost_df["Equipo"].tolist())
+            )
 
         st.dataframe(
-            eq_df.sort_values("minutos_sin_señal", ascending=False, na_position="last"),
+            eq_df,
             use_container_width=True,
+            column_config={
+                "Min sin señal": st.column_config.NumberColumn(
+                    "Min sin señal", format="%.1f min"
+                ),
+            },
+            hide_index=True,
         )
 
-        if not sin_senal.empty:
-            st.error(f"⚠️ **{len(sin_senal)} equipo(s) sin señal por más de {THRESHOLD_MIN} minutos:**  "
-                     + ", ".join(sin_senal["equipo_id"].tolist()))
+        # Bar chart: minutes without signal per device
+        chart_df = eq_df.dropna(subset=["Min sin señal"]).set_index("Equipo")[["Min sin señal"]]
+        if not chart_df.empty:
+            st.subheader("Tiempo sin señal por equipo (minutos)")
+            st.bar_chart(chart_df)
+            st.caption(
+                f"Línea de alerta SNS: {ALERT_MIN} min  |  "
+                f"Línea de auto-mantenimiento: {MAINT_MIN} min"
+            )
 
-# ── TAB 3: Maintenance summary ────────────────────────────────────────────────
+
+# ═════════════════════════════════════════════════════
+# TAB 2 — Calidad de Datos
+# ═════════════════════════════════════════════════════
+with tab_quality:
+    dataset_sel = st.radio(
+        "Dataset a inspeccionar",
+        ["gps_eventos", "mantenimientos"],
+        horizontal=True,
+        help="gps_eventos = flujo streaming | mantenimientos = CSV batch",
+    )
+    runs_df = load_quality_runs(dataset_sel)
+
+    if runs_df.empty:
+        st.info(
+            "Sin métricas de calidad aún. Ejecuta:\n\n"
+            "`python3 scripts/run_pipeline.py --quality`"
+        )
+    else:
+        latest = runs_df.iloc[-1]
+
+        # ── KPIs del último run ───────────────────────────────────────────────
+        st.subheader("Último check de calidad")
+        st.caption(f"Ejecutado: {latest['Fecha/hora del check']}")
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric(
+            "Registros analizados",
+            int(latest["Registros en silver"]),
+            help="Cuántas filas había en silver/ cuando se ejecutó el check. "
+                 "Este número crece con cada run del pipeline — es correcto.",
+        )
+        c2.metric(
+            "% Registros válidos",
+            f"{latest['% válidos']:.1f}%",
+            help="Porcentaje de filas que pasaron todas las reglas Pandera. "
+                 "< 95% indica un problema serio en la fuente de datos.",
+            delta=f"{latest['% válidos'] - 100:.1f}%" if latest["% válidos"] < 100 else "✓ Sin errores",
+            delta_color="inverse" if latest["% válidos"] < 100 else "off",
+        )
+        c3.metric(
+            "% Duplicados detectados",
+            f"{latest['% duplicados']:.1f}%",
+            help="Porcentaje de filas con clave duplicada (equipo_id + timestamp). "
+                 "Duplicados son normales si el pipeline se ejecutó varias veces con el mismo CSV.",
+            delta=f"{latest['% duplicados']:.1f}% dup" if latest["% duplicados"] > 0 else "✓ Sin duplicados",
+            delta_color="inverse" if latest["% duplicados"] > 5 else "off",
+        )
+        c4.metric(
+            "Errores Pandera",
+            int(latest["Filas con error Pandera"]),
+            help="Número de celdas que violan una regla del schema "
+                 "(bbox, rango de velocidad, fecha inválida, etc.).",
+            delta="✓ Cero errores" if latest["Filas con error Pandera"] == 0 else None,
+            delta_color="off",
+        )
+
+        # ── Tendencia histórica ───────────────────────────────────────────────
+        if len(runs_df) > 1:
+            st.subheader("Tendencia de calidad en el tiempo")
+            trend_df = runs_df.set_index("Fecha/hora del check")[["% válidos", "% duplicados"]]
+            st.line_chart(trend_df, color=["#2ecc71", "#e74c3c"])
+            st.caption(
+                "Verde = % válidos (meta: 100%)  |  "
+                "Rojo = % duplicados (meta: 0%)  |  "
+                "El eje X es el timestamp de cada check de calidad."
+            )
+
+        # ── Detalle por columna ───────────────────────────────────────────────
+        completeness = latest.get("_completeness", {})
+        out_of_range = latest.get("_out_of_range", {})
+
+        if completeness:
+            st.subheader("Completitud y rangos por columna")
+            col_df = pd.DataFrame([
+                {
+                    "Columna":             col,
+                    "% valores presentes": f"{pct:.1f}%",
+                    "% fuera de rango":    f"{out_of_range.get(col, 0):.1f}%",
+                    "Estado":              "✅ OK" if pct == 100 and out_of_range.get(col, 0) == 0
+                                           else ("⚠️ revisar" if pct >= 95 else "🚨 crítico"),
+                }
+                for col, pct in completeness.items()
+            ])
+            st.dataframe(col_df, use_container_width=True, hide_index=True)
+            st.caption(
+                "Completitud = % de celdas con valor (no nulo). "
+                "Fuera de rango = % de valores que violan los límites del schema "
+                "(para GPS: bbox Áncash lat/lon, velocidad 0–200 km/h)."
+            )
+
+        # ── Historial de runs ─────────────────────────────────────────────────
+        with st.expander("Ver todos los runs"):
+            display_df = runs_df[[
+                "Fecha/hora del check", "Registros en silver",
+                "% válidos", "% duplicados", "Filas con error Pandera",
+            ]].copy()
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            st.caption(
+                "**Por qué 'Registros en silver' crece:** el quality checker escanea TODOS "
+                "los Parquet en silver/ cada vez que corre. Si corres el pipeline 5 veces, "
+                "acumulas 5 × 50 = 250 filas. Esto es intencional — mide la salud de TODA "
+                "la data histórica, no solo la del último lote."
+            )
+
+
+# ═════════════════════════════════════════════════════
+# TAB 3 — Mantenimientos
+# ═════════════════════════════════════════════════════
 with tab_maintenance:
-    st.subheader("Resumen de mantenimientos (silver/)")
     mant_df = load_silver_parquet("mantenimientos/")
 
     if mant_df.empty:
-        st.info("No hay datos de mantenimiento en silver/. Sube un CSV a bronze/mantenimientos/.")
+        st.info(
+            "Sin datos de mantenimiento. Ejecuta:\n\n"
+            "`python3 scripts/run_pipeline.py --batch`"
+        )
     else:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total registros", len(mant_df))
-        criticas = mant_df[mant_df["tipo_falla"] == "CRITICA"] if "tipo_falla" in mant_df.columns else pd.DataFrame()
-        c2.metric("Fallas críticas", len(criticas))
-        c3.metric("Equipos únicos",
-                  mant_df["equipo_id"].nunique() if "equipo_id" in mant_df.columns else 0)
+        # Separate auto-generated GPS loss records from manual maintenance
+        is_auto = mant_df["tipo_falla"].str.contains("GPS DESCONECTADO", na=False) \
+                  if "tipo_falla" in mant_df.columns else pd.Series(False, index=mant_df.index)
+        manual_df = mant_df[~is_auto]
+        auto_df   = mant_df[is_auto]
 
-        # Equipos con >3 fallas críticas (replicates Athena query locally)
-        if not criticas.empty and "equipo_id" in criticas.columns:
-            top_fallas = (
-                criticas.groupby("equipo_id")
+        alta_df = mant_df[mant_df.get("criticidad", pd.Series()) == "ALTA"] \
+                  if "criticidad" in mant_df.columns else pd.DataFrame()
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total registros",    len(mant_df),
+                  help="Manual + auto-generados por pérdida de GPS")
+        c2.metric("🔴 Criticidad ALTA", len(alta_df),
+                  help="Fallas con criticidad=ALTA, incluye GPS desconectado")
+        c3.metric("⚙️ Manuales (CSV)",   len(manual_df),
+                  help="Registros ingresados por los técnicos vía CSV")
+        c4.metric("🤖 Auto GPS-loss",    len(auto_df),
+                  help=f"Creados automáticamente cuando el equipo supera {MAINT_MIN} min sin señal")
+
+        # ── Fallas críticas por equipo (replica query Athena) ────────────────
+        if "criticidad" in mant_df.columns and "equipo_id" in mant_df.columns:
+            fallas_df = (
+                mant_df[mant_df["criticidad"] == "ALTA"]
+                .groupby("equipo_id")
                 .size()
-                .reset_index(name="fallas_criticas")
-                .query("fallas_criticas > 3")
-                .sort_values("fallas_criticas", ascending=False)
+                .reset_index(name="Fallas ALTA")
+                .sort_values("Fallas ALTA", ascending=False)
             )
-            if not top_fallas.empty:
-                st.subheader("🚨 Equipos con >3 fallas críticas")
-                st.dataframe(top_fallas, use_container_width=True)
+            if not fallas_df.empty:
+                st.subheader("Fallas de criticidad ALTA por equipo")
+                st.bar_chart(fallas_df.set_index("equipo_id"))
+                at_risk = fallas_df[fallas_df["Fallas ALTA"] > 3]
+                if not at_risk.empty:
+                    st.error(
+                        f"🚨 **{len(at_risk)} equipo(s) con >3 fallas ALTA** "
+                        f"— coinciden con el filtro del query Athena:  \n"
+                        + "  ".join(f"`{e}` ({n})" for e, n in zip(at_risk["equipo_id"], at_risk["Fallas ALTA"]))
+                    )
 
-        st.subheader("Detalle")
-        st.dataframe(mant_df, use_container_width=True)
+        # ── Auto-generated GPS loss records ───────────────────────────────────
+        if not auto_df.empty:
+            with st.expander(f"Ver {len(auto_df)} registros auto-generados por pérdida de señal"):
+                st.dataframe(
+                    auto_df[["equipo_id", "fecha_mantenimiento", "tipo_falla", "criticidad"]],
+                    use_container_width=True, hide_index=True,
+                )
+                st.caption(
+                    "Estos registros fueron creados automáticamente por `detect_signal_loss` "
+                    f"cuando un equipo superó {MAINT_MIN} min sin enviar señal GPS. "
+                    "Se tratan igual que los manuales en el query Athena."
+                )
+
+        # ── Manual records ─────────────────────────────────────────────────────
+        if not manual_df.empty:
+            with st.expander(f"Ver {len(manual_df)} registros manuales (CSV)", expanded=True):
+                cols = [c for c in ["equipo_id", "fecha_mantenimiento", "tipo_falla",
+                                    "criticidad"] if c in manual_df.columns]
+                st.dataframe(manual_df[cols], use_container_width=True, hide_index=True)
