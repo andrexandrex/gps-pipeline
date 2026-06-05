@@ -2,31 +2,41 @@
 Lambda: detect_signal_loss
 Trigger: EventBridge Scheduler every 5 minutes
 
-Scans gps-last-seen DynamoDB table.  For every equipo whose last_seen is
-older than SIGNAL_LOSS_THRESHOLD_MINUTES, publishes one SNS message with
-all affected devices grouped — avoids SNS fan-out storm for large fleets.
+For each equipo whose last GPS event is older than SIGNAL_LOSS_THRESHOLD_MINUTES:
+  1. Logs a warning
+  2. Publishes a grouped SNS alert (one message for all affected devices)
+  3. Auto-creates a maintenance record in silver/mantenimientos/ with
+     tipo_falla="GPS DESCONECTADO" and criticidad="ALTA" — this feeds the
+     Athena "fallas críticas" query automatically, no manual entry needed.
 
-Idempotency: scanning + comparing timestamps is a read-only operation;
-re-runs produce the same alert for the same silent window (acceptable;
-downstream dedup on the alert consumer side if needed).
+The auto-maintenance record uses AUTO_MAINTENANCE_THRESHOLD_MINUTES (default 30 min)
+which is intentionally higher than the alert threshold (10 min) to avoid flooding
+the maintenance table with transient signal dips.
 
-Alternative: for >10k devices, replace Scan with a GSI on last_seen
-(sort key) and use Query with a KeyConditionExpression — O(results) vs O(table).
+Design note: separate thresholds for alert vs maintenance record is the key design
+decision here. Alert at 10 min (operator should check), maintenance record at 30 min
+(device is likely physically broken or stolen). Alternative: single threshold for both
+— simpler but creates noisy maintenance records for brief connectivity issues.
 """
 
+import io
 import json
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import boto3
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from common.logger import get_logger
 
 logger = get_logger("detect_signal_loss")
 
 _dynamo: Optional[boto3.client] = None
-_sns: Optional[boto3.client] = None
+_sns:    Optional[boto3.client] = None
+_s3:     Optional[boto3.client] = None
 
 
 def _dynamo_client() -> boto3.client:
@@ -45,8 +55,15 @@ def _sns_client() -> boto3.client:
     return _sns
 
 
+def _s3_client() -> boto3.client:
+    global _s3
+    if _s3 is None:
+        kw = {"endpoint_url": ep} if (ep := os.getenv("AWS_ENDPOINT_URL")) else {}
+        _s3 = boto3.client("s3", **kw)
+    return _s3
+
+
 def _scan_all_devices(table_name: str) -> list[dict]:
-    """Full table scan with pagination — safe for fleets up to ~10k devices."""
     paginator = _dynamo_client().get_paginator("scan")
     items = []
     for page in paginator.paginate(TableName=table_name):
@@ -54,25 +71,59 @@ def _scan_all_devices(table_name: str) -> list[dict]:
     return items
 
 
-def handler(event: dict, context) -> dict:
-    table_name = os.getenv("DYNAMO_TABLE_NAME", "gps-last-seen")
-    topic_arn = os.getenv("SNS_TOPIC_ARN", "")
-    threshold_min = int(os.getenv("SIGNAL_LOSS_THRESHOLD_MINUTES", "10"))
+def _create_maintenance_records(equipos: list[dict], silver_bucket: str) -> str:
+    """
+    Writes a Parquet maintenance record for each device with extended signal loss.
+    Key: auto_gps_loss_<timestamp>.parquet — unique per run, safe to re-process.
+    """
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    records = [
+        {
+            "equipo_id":            e["equipo_id"],
+            "fecha_mantenimiento":  now_str,
+            "tipo_falla":           f"GPS DESCONECTADO ({e['minutes_silent']:.0f} min sin señal)",
+            "criticidad":           "ALTA",
+        }
+        for e in equipos
+    ]
+    df = pd.DataFrame(records)
+    buf = io.BytesIO()
+    pq.write_table(pa.Table.from_pandas(df, preserve_index=False), buf, compression="snappy")
+    buf.seek(0)
 
-    now = datetime.now(timezone.utc)
+    ts  = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    key = f"mantenimientos/auto_gps_loss_{ts}.parquet"
+    _s3_client().put_object(Bucket=silver_bucket, Key=key, Body=buf.getvalue())
+
+    logger.info("Auto-maintenance records created", extra={
+        "bucket": silver_bucket, "key": key, "count": len(records),
+    })
+    return key
+
+
+def handler(event: dict, context) -> dict:
+    table_name     = os.getenv("DYNAMO_TABLE_NAME",              "gps-last-seen")
+    topic_arn      = os.getenv("SNS_TOPIC_ARN",                  "")
+    silver_bucket  = os.getenv("SILVER_BUCKET",                  "gps-silver")
+    threshold_min  = int(os.getenv("SIGNAL_LOSS_THRESHOLD_MINUTES",   "10"))
+    maint_threshold = int(os.getenv("AUTO_MAINTENANCE_THRESHOLD_MINUTES", "30"))
+
+    now    = datetime.now(timezone.utc)
     cutoff = now - timedelta(minutes=threshold_min)
+    maint_cutoff = now - timedelta(minutes=maint_threshold)
 
     logger.info("Signal-loss scan started", extra={
-        "threshold_minutes": threshold_min,
-        "cutoff": cutoff.isoformat(),
+        "alert_threshold_min": threshold_min,
+        "maintenance_threshold_min": maint_threshold,
     })
 
     items = _scan_all_devices(table_name)
-    lost = []
+    alert_lost = []    # silent > alert threshold  → SNS
+    maint_lost = []    # silent > maint threshold  → auto maintenance record
 
     for item in items:
-        equipo_id = item.get("equipo_id", {}).get("S", "UNKNOWN")
-        last_seen_str = item.get("last_seen", {}).get("S")
+        equipo_id     = item.get("equipo_id", {}).get("S", "UNKNOWN")
+        last_seen_str = item.get("last_seen",  {}).get("S")
 
         if not last_seen_str:
             logger.warning("No last_seen for device", extra={"equipo_id": equipo_id})
@@ -88,44 +139,63 @@ def handler(event: dict, context) -> dict:
             })
             continue
 
+        minutes_silent = round((now - last_seen_dt).total_seconds() / 60, 1)
+
         if last_seen_dt < cutoff:
-            minutes_silent = round((now - last_seen_dt).total_seconds() / 60, 1)
-            lost.append({
-                "equipo_id": equipo_id,
-                "last_seen": last_seen_str,
-                "minutes_silent": minutes_silent,
-            })
-            logger.warning("Signal loss", extra={
-                "equipo_id": equipo_id,
-                "minutes_silent": minutes_silent,
+            entry = {"equipo_id": equipo_id, "last_seen": last_seen_str,
+                     "minutes_silent": minutes_silent}
+            alert_lost.append(entry)
+            logger.warning("Signal loss — alert", extra={
+                "equipo_id": equipo_id, "minutes_silent": minutes_silent,
             })
 
-    logger.info("Scan complete", extra={"total_devices": len(items), "lost": len(lost)})
+        if last_seen_dt < maint_cutoff:
+            maint_lost.append({"equipo_id": equipo_id, "minutes_silent": minutes_silent})
+            logger.warning("Signal loss — auto maintenance", extra={
+                "equipo_id": equipo_id, "minutes_silent": minutes_silent,
+            })
 
-    if not lost:
-        return {"lost": 0, "equipos": []}
+    logger.info("Scan complete", extra={
+        "total_devices": len(items),
+        "alert_lost": len(alert_lost),
+        "maintenance_created": len(maint_lost),
+    })
 
-    if topic_arn:
+    # ── SNS alert ─────────────────────────────────────────────────────────────
+    if alert_lost and topic_arn:
         payload = {
-            "alert_type": "SIGNAL_LOSS",
-            "detected_at": now.isoformat(),
-            "threshold_minutes": threshold_min,
-            "affected_count": len(lost),
-            "affected_equipos": lost,
+            "alert_type":        "SIGNAL_LOSS",
+            "detected_at":       now.isoformat(),
+            "alert_threshold_min": threshold_min,
+            "maint_threshold_min": maint_threshold,
+            "affected_count":    len(alert_lost),
+            "affected_equipos":  alert_lost,
         }
         try:
             _sns_client().publish(
                 TopicArn=topic_arn,
-                Subject=f"[GPS ALERTA] {len(lost)} equipo(s) sin señal >{threshold_min} min",
+                Subject=f"[GPS ALERTA] {len(alert_lost)} equipo(s) sin señal >{threshold_min} min",
                 Message=json.dumps(payload, indent=2),
                 MessageAttributes={
                     "alert_type": {"DataType": "String", "StringValue": "SIGNAL_LOSS"},
                 },
             )
-            logger.info("SNS alert published", extra={"lost": len(lost)})
+            logger.info("SNS alert published", extra={"alert_lost": len(alert_lost)})
         except Exception as exc:
             logger.error("SNS publish failed", extra={"error": str(exc)})
-    else:
-        logger.warning("SNS_TOPIC_ARN not set — alert not sent")
 
-    return {"lost": len(lost), "equipos": [e["equipo_id"] for e in lost]}
+    # ── Auto-maintenance record ────────────────────────────────────────────────
+    maint_key = None
+    if maint_lost:
+        try:
+            maint_key = _create_maintenance_records(maint_lost, silver_bucket)
+        except Exception as exc:
+            logger.error("Failed to create auto-maintenance records",
+                         extra={"error": str(exc)})
+
+    return {
+        "alert_lost":   len(alert_lost),
+        "maint_created": len(maint_lost),
+        "maint_key":    maint_key,
+        "equipos":      [e["equipo_id"] for e in alert_lost],
+    }

@@ -53,14 +53,14 @@ resource "aws_lambda_function" "validate_gps" {
 
   environment {
     variables = {
-      AWS_ENDPOINT_URL                = var.use_localstack ? "http://localstack:4566" : ""
-      DYNAMO_TABLE_NAME               = aws_dynamodb_table.last_seen.name
-      DEDUP_TABLE_NAME                = aws_dynamodb_table.dedup.name
-      SNS_TOPIC_ARN                   = aws_sns_topic.alertas.arn
-      SILVER_BUCKET                   = aws_s3_bucket.silver.bucket
-      BRONZE_BUCKET                   = aws_s3_bucket.bronze.bucket
-      SIGNAL_LOSS_THRESHOLD_MINUTES   = "10"
-      LOG_LEVEL                       = "INFO"
+      AWS_ENDPOINT_URL              = var.use_localstack ? "http://localstack:4566" : ""
+      DYNAMO_TABLE_NAME             = aws_dynamodb_table.last_seen.name
+      DEDUP_TABLE_NAME              = aws_dynamodb_table.dedup.name
+      SNS_TOPIC_ARN                 = aws_sns_topic.alertas.arn
+      SILVER_BUCKET                 = aws_s3_bucket.silver.bucket
+      BRONZE_BUCKET                 = aws_s3_bucket.bronze.bucket
+      SIGNAL_LOSS_THRESHOLD_MINUTES = "10"
+      LOG_LEVEL                     = "INFO"
     }
   }
 
@@ -78,7 +78,7 @@ resource "aws_lambda_event_source_mapping" "kinesis_to_validate" {
   maximum_batching_window_in_seconds = 10
 
   # On error: retry 2x, then split batch to isolate bad record
-  maximum_retry_attempts       = 2
+  maximum_retry_attempts         = 2
   bisect_batch_on_function_error = true
 
   destination_config {
@@ -149,8 +149,8 @@ resource "aws_lambda_function" "ingest_maintenance" {
   runtime          = "python3.12"
   filename         = data.archive_file.ingest_maintenance_zip.output_path
   source_code_hash = data.archive_file.ingest_maintenance_zip.output_base64sha256
-  timeout          = 120   # CSV parsing can take longer than GPS validation
-  memory_size      = 512   # pandas + pyarrow benefit from extra memory
+  timeout          = 120 # CSV parsing can take longer than GPS validation
+  memory_size      = 512 # pandas + pyarrow benefit from extra memory
 
   environment {
     variables = {

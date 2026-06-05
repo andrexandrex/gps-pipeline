@@ -23,7 +23,8 @@ _DEFAULTS = {
     "SNS_TOPIC_ARN":                 "arn:aws:sns:us-east-1:000000000000:gps-alertas",
     "SILVER_BUCKET":                 "gps-silver",
     "BRONZE_BUCKET":                 "gps-bronze",
-    "SIGNAL_LOSS_THRESHOLD_MINUTES": "10",
+    "SIGNAL_LOSS_THRESHOLD_MINUTES":      "10",
+    "AUTO_MAINTENANCE_THRESHOLD_MINUTES": "30",
 }
 for _k, _v in _DEFAULTS.items():
     os.environ.setdefault(_k, _v)

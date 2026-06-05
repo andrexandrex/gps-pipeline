@@ -55,7 +55,7 @@ resource "aws_cloudwatch_metric_alarm" "kinesis_iterator_age" {
   namespace           = "AWS/Kinesis"
   period              = 60
   extended_statistic  = "p99"
-  threshold           = 60000   # 60 seconds — Lambda is >1 min behind
+  threshold           = 60000 # 60 seconds — Lambda is >1 min behind
   alarm_description   = "Kinesis consumer >60s behind — validate_gps may be throttled or erroring"
   alarm_actions       = local.alarm_actions
   treat_missing_data  = "notBreaching"
@@ -93,7 +93,7 @@ resource "aws_cloudwatch_metric_alarm" "validate_gps_duration" {
   namespace           = "AWS/Lambda"
   period              = 60
   extended_statistic  = "p99"
-  threshold           = 45000   # 45s — 75% of the 60s timeout
+  threshold           = 45000 # 45s — 75% of the 60s timeout
   alarm_description   = "validate_gps P99 duration >45s — approaching timeout"
   alarm_actions       = local.alarm_actions
   treat_missing_data  = "notBreaching"

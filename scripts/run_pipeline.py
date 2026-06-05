@@ -46,7 +46,8 @@ os.environ.setdefault("SNS_TOPIC_ARN",                 "arn:aws:sns:us-east-1:00
 os.environ.setdefault("SILVER_BUCKET",                 "gps-silver")
 os.environ.setdefault("BRONZE_BUCKET",                 "gps-bronze")
 os.environ.setdefault("GOLD_BUCKET",                   "gps-gold")
-os.environ.setdefault("SIGNAL_LOSS_THRESHOLD_MINUTES", "10")
+os.environ.setdefault("SIGNAL_LOSS_THRESHOLD_MINUTES",        "10")
+os.environ.setdefault("AUTO_MAINTENANCE_THRESHOLD_MINUTES",   "30")
 
 import boto3
 

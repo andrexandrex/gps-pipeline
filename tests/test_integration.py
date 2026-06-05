@@ -24,9 +24,30 @@ _kw = dict(endpoint_url=EP, region_name=REGION,
            aws_access_key_id="test", aws_secret_access_key="test")
 
 
+# All equipo_ids created by integration tests — cleaned up after the session
+_TEST_EQUIPO_IDS = [
+    "CAM_IT_01", "CAM_IT_02", "CAM_IT_03",
+    "CAM_LAST_SEEN", "CAM_ACTIVE_TEST", "CAM_SILENT_TEST", "CAM_MAINT_TEST",
+]
+
+
 @pytest.fixture(scope="session")
 def dynamo():
     return boto3.client("dynamodb", **_kw)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_test_data(dynamo):
+    """Remove all test equipo entries from DynamoDB after the session."""
+    yield
+    for eid in _TEST_EQUIPO_IDS:
+        try:
+            dynamo.delete_item(
+                TableName="gps-last-seen",
+                Key={"equipo_id": {"S": eid}},
+            )
+        except Exception:
+            pass
 
 @pytest.fixture(scope="session")
 def s3():
@@ -83,7 +104,7 @@ class TestValidateGps:
             "DEDUP_TABLE_NAME": "gps-dedup",
         })
 
-        result = handler(_kinesis_event([_good_record("EQ_IT_01")]), None)
+        result = handler(_kinesis_event([_good_record("CAM_IT_01")]), None)
         assert result["valid"] == 1
         assert result["rejected"] == 0
 
@@ -97,7 +118,7 @@ class TestValidateGps:
         mod._dynamo = None
         mod._s3 = None
 
-        bad = _good_record("EQ_IT_02")
+        bad = _good_record("CAM_IT_02")
         bad["latitude"] = 50.0   # outside Áncash
 
         result = mod.handler(_kinesis_event([bad]), None)
@@ -111,7 +132,7 @@ class TestValidateGps:
         mod._dynamo = None
         mod._s3 = None
 
-        rec = _good_record("EQ_IT_03")
+        rec = _good_record("CAM_IT_03")
         event = _kinesis_event([rec])
 
         first = mod.handler(event, None)
@@ -126,28 +147,31 @@ class TestValidateGps:
         mod._dynamo = None
         mod._s3 = None
 
-        rec = _good_record("EQ_LAST_SEEN")
+        rec = _good_record("CAM_LAST_SEEN")
         mod.handler(_kinesis_event([rec]), None)
 
         item = dynamo.get_item(
             TableName="gps-last-seen",
-            Key={"equipo_id": {"S": "EQ_LAST_SEEN"}},
+            Key={"equipo_id": {"S": "CAM_LAST_SEEN"}},
         ).get("Item")
         assert item is not None
         assert "last_seen" in item
 
 
 class TestDetectSignalLoss:
-    def test_no_alert_when_devices_active(self, dynamo):
+    @pytest.fixture(autouse=True)
+    def reset_clients(self):
         from lambdas.detect_signal_loss import handler as mod
-        mod._dynamo = None
-        mod._sns = None
+        mod._dynamo = mod._sns = mod._s3 = None
+        yield
+        mod._dynamo = mod._sns = mod._s3 = None
 
-        # Plant a recent last_seen
+    def test_no_alert_when_devices_active(self, dynamo):
+        from lambdas.detect_signal_loss.handler import handler
         dynamo.put_item(
             TableName="gps-last-seen",
             Item={
-                "equipo_id": {"S": "EQ_ACTIVE"},
+                "equipo_id": {"S": "CAM_ACTIVE_TEST"},
                 "last_seen": {"S": datetime.now(timezone.utc).isoformat()},
             },
         )
@@ -156,25 +180,46 @@ class TestDetectSignalLoss:
             "DYNAMO_TABLE_NAME": "gps-last-seen",
             "SNS_TOPIC_ARN": f"arn:aws:sns:{REGION}:000000000000:gps-alertas",
             "SIGNAL_LOSS_THRESHOLD_MINUTES": "10",
+            "AUTO_MAINTENANCE_THRESHOLD_MINUTES": "30",
         })
-        result = mod.handler({}, None)
-        # EQ_ACTIVE should NOT be in lost list
-        assert "EQ_ACTIVE" not in result.get("equipos", [])
+        result = handler({}, None)
+        assert "CAM_ACTIVE_TEST" not in result.get("equipos", [])
 
     def test_alert_when_device_silent(self, dynamo):
-        from lambdas.detect_signal_loss import handler as mod
-        mod._dynamo = None
-        mod._sns = None
-
-        old_ts = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+        from lambdas.detect_signal_loss.handler import handler
+        old_ts = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
         dynamo.put_item(
             TableName="gps-last-seen",
             Item={
-                "equipo_id": {"S": "EQ_SILENT"},
+                "equipo_id": {"S": "CAM_SILENT_TEST"},
                 "last_seen": {"S": old_ts},
             },
         )
         os.environ["SIGNAL_LOSS_THRESHOLD_MINUTES"] = "10"
-        result = mod.handler({}, None)
-        assert "EQ_SILENT" in result.get("equipos", [])
-        assert result["lost"] >= 1
+        os.environ["AUTO_MAINTENANCE_THRESHOLD_MINUTES"] = "30"
+        result = handler({}, None)
+        assert "CAM_SILENT_TEST" in result.get("equipos", [])
+        assert result["alert_lost"] >= 1
+
+    def test_auto_maintenance_created_for_long_silence(self, dynamo, s3):
+        from lambdas.detect_signal_loss.handler import handler
+        # Silent for 40 minutes — exceeds both alert (10 min) and maint (30 min) thresholds
+        old_ts = (datetime.now(timezone.utc) - timedelta(minutes=40)).isoformat()
+        dynamo.put_item(
+            TableName="gps-last-seen",
+            Item={
+                "equipo_id": {"S": "CAM_MAINT_TEST"},
+                "last_seen": {"S": old_ts},
+            },
+        )
+        os.environ.update({
+            "SIGNAL_LOSS_THRESHOLD_MINUTES": "10",
+            "AUTO_MAINTENANCE_THRESHOLD_MINUTES": "30",
+            "SILVER_BUCKET": "gps-silver",
+        })
+        result = handler({}, None)
+        assert result["maint_created"] >= 1
+        assert result["maint_key"] is not None
+        # Verify Parquet landed in silver/mantenimientos/
+        objs = s3.list_objects_v2(Bucket="gps-silver", Prefix="mantenimientos/auto_gps_loss_")
+        assert objs.get("KeyCount", 0) >= 1
