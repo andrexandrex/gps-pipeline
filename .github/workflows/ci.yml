@@ -32,6 +32,7 @@ jobs:
             tests/test_validate_gps.py \
             tests/test_batch.py \
             tests/test_quality.py \
+            -k "not Integration" \
             -v --tb=short
 
   # ── 2. Integration tests (LocalStack in CI) ─────────────────────────────────

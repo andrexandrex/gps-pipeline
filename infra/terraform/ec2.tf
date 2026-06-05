@@ -72,7 +72,7 @@ resource "aws_security_group" "dashboard" {
   description = "Streamlit dashboard (8501) + SSH (22)"
 
   ingress {
-    description = "Streamlit — public access"
+    description = "Streamlit - public access"
     from_port   = 8501
     to_port     = 8501
     protocol    = "tcp"
