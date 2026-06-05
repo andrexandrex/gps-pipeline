@@ -56,6 +56,9 @@ pipeline-batch: ## Run only CSV maintenance ingestion
 pipeline-quality: ## Run only quality checker
 	$(ENV) $(PYPATH) $(PYTHON) scripts/run_pipeline.py --quality
 
+sql:         ## Run the critical faults SQL query against local data (simulates Athena)
+	$(ENV) $(PYPATH) $(PYTHON) scripts/run_sql_local.py
+
 ## ── Dashboard ───────────────────────────────────────────────────────────────
 
 dashboard:   ## Open Streamlit dashboard at http://localhost:8501
