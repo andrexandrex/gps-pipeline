@@ -22,7 +22,13 @@ up:          ## Start LocalStack (fake AWS)
 down:        ## Stop LocalStack
 	sg docker -c "docker compose down --remove-orphans"
 
-status:      ## Show pipeline status (S3, DynamoDB, Kinesis, Dashboard)
+bootstrap:   ## Create all AWS resources in LocalStack (run once after `make up`)
+	AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
+	AWS_DEFAULT_REGION=us-east-1 \
+	AWS_ENDPOINT_URL=http://localhost:4566 \
+	bash infra/scripts/bootstrap.sh
+
+status:      ## Show pipeline status (S3, DynamoDB, SQS, Dashboard)
 	$(ENV) $(PYPATH) bash scripts/status.sh
 
 logs:        ## Show LocalStack logs

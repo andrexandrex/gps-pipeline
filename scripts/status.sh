@@ -25,15 +25,19 @@ else
   echo -e "    Status: ${RED}● DOWN${NC}  —  corre: docker compose up -d"
 fi
 
-# 2. Kinesis stream
+# 2. SQS queue
 echo ""
-echo -e "${BLUE}[2] Kinesis stream (gps-eventos)${NC}"
-SHARDS=$(aws $EP kinesis describe-stream-summary --stream-name gps-eventos \
-  --query StreamDescriptionSummary.OpenShardCount --output text 2>/dev/null || echo "0")
-SEQ=$(aws $EP kinesis get-shard-iterator --stream-name gps-eventos --shard-id shardId-000000000000 \
-  --shard-iterator-type LATEST --query ShardIterator --output text 2>/dev/null)
-echo -e "    Shards activos: ${GREEN}$SHARDS${NC}"
-echo "    Para leer eventos en vivo: ver sección [Comandos útiles] abajo"
+echo -e "${BLUE}[2] SQS — cola GPS (gps-eventos)${NC}"
+QUEUE_URL=$(aws $EP sqs get-queue-url --queue-name gps-eventos \
+  --query QueueUrl --output text 2>/dev/null || echo "")
+if [ -n "$QUEUE_URL" ]; then
+  MSGS=$(aws $EP sqs get-queue-attributes --queue-url "$QUEUE_URL" \
+    --attribute-names ApproximateNumberOfMessages \
+    --query Attributes.ApproximateNumberOfMessages --output text 2>/dev/null || echo "?")
+  echo -e "    Cola: ${GREEN}EXISTE${NC}  |  Mensajes pendientes: ${YELLOW}${MSGS}${NC}"
+else
+  echo -e "    Cola: ${RED}NO EXISTE${NC}  —  corre: make bootstrap"
+fi
 
 # 3. DynamoDB — equipos rastreados
 echo ""
@@ -91,26 +95,19 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo -e "${YELLOW}Comandos útiles:${NC}"
 echo ""
-echo "  Iniciar producer GPS (Terminal 1):"
-echo "    cd ~/code_AWS/gps-pipeline"
-echo "    source .venv/bin/activate"
-echo "    PYTHONPATH=src:src/lambdas AWS_ACCESS_KEY_ID=test \\"
-echo "    AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1 \\"
-echo "    AWS_ENDPOINT_URL=http://localhost:4566 KINESIS_STREAM_NAME=gps-eventos \\"
-echo "    python3 -m producer.simulator"
+echo "  Ciclo habitual (3 terminales):"
+echo "    Terminal 1  →  make up           (LocalStack, déjalo corriendo)"
+echo "    Terminal 2  →  make pipeline     (genera datos, una vez o cuantas quieras)"
+echo "    Terminal 3  →  make dashboard    (Streamlit, se auto-recarga al guardar)"
 echo ""
-echo "  Procesar batch CSV (una vez):"
-echo "    source .venv/bin/activate"
-echo "    AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \\"
-echo "    AWS_DEFAULT_REGION=us-east-1 \\"
-echo "    aws --endpoint-url=http://localhost:4566 s3 cp \\"
-echo "      data/mantenimiento_sample.csv \\"
-echo "      s3://gps-bronze/mantenimientos/mantenimiento_$(date +%Y%m%d).csv"
-echo "    PYTHONPATH=src:src/lambdas python3 scripts/run_batch.py"
+echo "  Ver archivos Parquet creados en silver:"
+echo "    aws $EP s3 ls s3://gps-silver/ --recursive | grep -v .keep"
 echo ""
-echo "  Ver logs del producer en tiempo real:"
-echo "    (ejecuta el producer y mira la salida en la terminal)"
+echo "  Ver equipos rastreados en DynamoDB:"
+echo "    aws $EP dynamodb scan --table-name gps-last-seen --output table"
 echo ""
-echo "  Ver últimos GPS en silver:"
-echo "    aws $EP s3 ls s3://gps-silver/gps_eventos/ --recursive | tail -5"
+echo "  Ver mensajes en la cola GPS:"
+echo "    aws $EP sqs get-queue-attributes \\"
+echo "      --queue-url http://localhost:4566/000000000000/gps-eventos \\"
+echo "      --attribute-names All"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
