@@ -195,6 +195,15 @@ jobs:
           aws s3api put-bucket-versioning --bucket "$STATE_BUCKET" \
             --versioning-configuration Status=Enabled
 
+      # Upload app bundle BEFORE terraform so EC2 user_data can download it on boot
+      - name: Build and upload app bundle for EC2
+        run: |
+          zip -r build/app-bundle.zip src/ requirements.txt data/ \
+            -x "*.pyc" -x "*/__pycache__/*" -x "*.egg-info/*"
+          aws s3 cp build/app-bundle.zip \
+            s3://${{ steps.aws_info.outputs.state_bucket }}/app-bundle.zip
+          echo "App bundle uploaded ($(du -sh build/app-bundle.zip | cut -f1))"
+
       - name: Terraform Apply (real AWS)
         working-directory: infra/terraform
         env:
@@ -211,13 +220,46 @@ jobs:
       - name: Deploy Lambda functions
         run: bash infra/scripts/deploy_lambdas.sh
 
-      - name: Smoke test — verify resources exist
+      # Seed initial GPS + maintenance data so the dashboard shows something on first load
+      - name: Seed initial data
         run: |
-          echo "=== S3 buckets ==="
-          aws s3 ls | grep gps-
-          echo "=== SQS queues ==="
-          aws sqs list-queues --query QueueUrls
-          echo "=== DynamoDB tables ==="
-          aws dynamodb list-tables --query TableNames
-          echo "=== Lambda functions ==="
-          aws lambda list-functions --query 'Functions[?contains(FunctionName, `validate`) || contains(FunctionName, `detect`) || contains(FunctionName, `ingest`)].FunctionName'
+          ACCOUNT_ID=${{ steps.aws_info.outputs.account_id }}
+          BRONZE="gps-bronze-${ACCOUNT_ID}"
+          QUEUE_URL=$(aws sqs get-queue-url --queue-name gps-eventos \
+            --query QueueUrl --output text)
+
+          echo "=== Uploading maintenance CSV ==="
+          aws s3 cp data/mantenimiento_sample.csv \
+            "s3://${BRONZE}/mantenimientos/mantenimiento_sample.csv"
+
+          echo "=== Sending 30 GPS events to SQS ==="
+          EQUIPOS=("CAM_001" "CAM_002" "CAM_003" "CAM_004" "CAM_005" \
+                   "CAM_006" "CAM_007" "CAM_008" "CAM_009" "CAM_010")
+          ESTADOS=("ACTIVO" "EN_RUTA" "DETENIDO")
+          for i in $(seq 1 30); do
+            IDX=$((RANDOM % 10))
+            EQUIPO="${EQUIPOS[$IDX]}"
+            TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            LAT="-$(echo "scale=6; 9 + ($RANDOM % 27) / 10" | bc)"
+            LON="-$(echo "scale=6; 77 + ($RANDOM % 20) / 10" | bc)"
+            VEL="$((RANDOM % 120))"
+            ESTADO="${ESTADOS[$((RANDOM % 3))]}"
+            MSG="{\"equipo_id\":\"${EQUIPO}\",\"timestamp\":\"${TS}\",\"latitud\":${LAT},\"longitud\":${LON},\"velocidad\":${VEL},\"estado\":\"${ESTADO}\"}"
+            aws sqs send-message --queue-url "$QUEUE_URL" --message-body "$MSG" \
+              --query MessageId --output text
+          done
+
+          echo "=== Waiting 20s for Lambda to process events ==="
+          sleep 20
+
+          echo "=== Checking silver bucket ==="
+          aws s3 ls "s3://gps-silver-${ACCOUNT_ID}/gps_eventos/" | head -5 || echo "  (still processing)"
+          aws s3 ls "s3://gps-silver-${ACCOUNT_ID}/mantenimientos/" | head -5 || echo "  (still processing)"
+
+      - name: Output dashboard URL
+        run: |
+          cd infra/terraform
+          terraform output dashboard_url
+          echo ""
+          echo "The dashboard will be available at the URL above within ~3 min"
+          echo "(EC2 is downloading the app bundle and starting the service)"

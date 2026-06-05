@@ -33,7 +33,7 @@ resource "aws_iam_role_policy" "dashboard_ec2_policy" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      # S3: read silver + gold, list buckets
+      # S3: read silver + gold + bronze + state bucket (for app bundle download)
       {
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:ListBucket"]
@@ -41,6 +41,8 @@ resource "aws_iam_role_policy" "dashboard_ec2_policy" {
           aws_s3_bucket.silver.arn, "${aws_s3_bucket.silver.arn}/*",
           aws_s3_bucket.gold.arn,   "${aws_s3_bucket.gold.arn}/*",
           aws_s3_bucket.bronze.arn, "${aws_s3_bucket.bronze.arn}/*",
+          "arn:aws:s3:::gps-tfstate-${var.aws_account_id}",
+          "arn:aws:s3:::gps-tfstate-${var.aws_account_id}/*",
         ]
       },
       # DynamoDB: scan last-seen table
@@ -57,6 +59,13 @@ resource "aws_iam_role_policy" "dashboard_ec2_policy" {
       },
     ]
   })
+}
+
+# SSM: allows running commands on the instance without SSH keys
+resource "aws_iam_role_policy_attachment" "dashboard_ec2_ssm" {
+  count      = var.use_localstack ? 0 : 1
+  role       = aws_iam_role.dashboard_ec2[0].name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
 resource "aws_iam_instance_profile" "dashboard_ec2" {
@@ -117,14 +126,69 @@ resource "aws_instance" "dashboard" {
   iam_instance_profile = aws_iam_instance_profile.dashboard_ec2[0].name
   vpc_security_group_ids = [aws_security_group.dashboard[0].id]
 
-  # Bootstrap: install Python + pip, then we SSH in and run setup_ec2.sh
+  # Full bootstrap: downloads app bundle from S3 state bucket and starts dashboard.
+  # Logs go to /var/log/gps-dashboard-setup.log
+  # The CI uploads build/app-bundle.zip to s3://gps-tfstate-<ACCOUNT>/app-bundle.zip
+  # BEFORE terraform apply so the bundle is already there when user_data runs.
   user_data = base64encode(<<-SCRIPT
     #!/bin/bash
-    dnf update -y
-    dnf install -y git python3.12 python3.12-pip
-    echo "EC2 bootstrap complete — SSH in and run: bash infra/scripts/setup_ec2.sh" \
-      >> /home/ec2-user/NEXT_STEP.txt
-    chown ec2-user:ec2-user /home/ec2-user/NEXT_STEP.txt
+    exec > /var/log/gps-dashboard-setup.log 2>&1
+    set -e
+    sleep 10   # let IAM instance profile propagate
+
+    dnf update -y -q
+    dnf install -y -q python3.12 python3.12-pip unzip
+
+    ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+    REGION=$(curl -sf http://169.254.169.254/latest/meta-data/placement/region || echo "us-east-1")
+    STATE_BUCKET="gps-tfstate-$${ACCOUNT_ID}"
+    APP_DIR="/home/ec2-user/gps-pipeline"
+
+    echo "Downloading app bundle from s3://$${STATE_BUCKET}/app-bundle.zip..."
+    aws s3 cp "s3://$${STATE_BUCKET}/app-bundle.zip" /tmp/app-bundle.zip
+    mkdir -p "$${APP_DIR}"
+    unzip -q /tmp/app-bundle.zip -d "$${APP_DIR}"
+    chown -R ec2-user:ec2-user "$${APP_DIR}"
+
+    echo "Installing Python dependencies..."
+    python3.12 -m pip install -q -r "$${APP_DIR}/requirements.txt"
+
+    echo "Writing .env..."
+    cat > "$${APP_DIR}/.env" << EOF
+    AWS_DEFAULT_REGION=$${REGION}
+    SILVER_BUCKET=gps-silver-$${ACCOUNT_ID}
+    GOLD_BUCKET=gps-gold-$${ACCOUNT_ID}
+    BRONZE_BUCKET=gps-bronze-$${ACCOUNT_ID}
+    SQS_GPS_QUEUE_NAME=gps-eventos
+    DYNAMO_TABLE_NAME=gps-last-seen
+    SIGNAL_LOSS_THRESHOLD_MINUTES=10
+    AUTO_MAINTENANCE_THRESHOLD_MINUTES=30
+    EOF
+    chown ec2-user:ec2-user "$${APP_DIR}/.env"
+
+    echo "Installing systemd service..."
+    cat > /etc/systemd/system/gps-dashboard.service << UNIT
+    [Unit]
+    Description=GPS Pipeline Streamlit Dashboard
+    After=network.target
+
+    [Service]
+    User=ec2-user
+    WorkingDirectory=$${APP_DIR}
+    EnvironmentFile=$${APP_DIR}/.env
+    Environment=PYTHONPATH=$${APP_DIR}/src:$${APP_DIR}/src/lambdas
+    ExecStart=/usr/bin/python3.12 -m streamlit run src/dashboard/app.py --server.port=8501 --server.address=0.0.0.0 --server.headless=true
+    Restart=always
+    RestartSec=10
+
+    [Install]
+    WantedBy=multi-user.target
+    UNIT
+
+    systemctl daemon-reload
+    systemctl enable gps-dashboard
+    systemctl start gps-dashboard
+    echo "Dashboard started. Check: systemctl status gps-dashboard"
   SCRIPT
   )
 
