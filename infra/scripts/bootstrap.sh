@@ -18,11 +18,11 @@ aws s3api put-bucket-versioning \
   --bucket gps-bronze \
   --versioning-configuration Status=Enabled $EP --no-cli-pager
 
-echo "[bootstrap] Creating Kinesis stream..."
-aws kinesis create-stream \
-  --stream-name gps-eventos \
-  --shard-count 2 \
-  --region "$REGION" $EP --no-cli-pager 2>/dev/null || echo "  stream already exists"
+echo "[bootstrap] Creating SQS GPS events queue..."
+aws sqs create-queue \
+  --queue-name gps-eventos \
+  --attributes VisibilityTimeout=120,MessageRetentionPeriod=86400,ReceiveMessageWaitTimeSeconds=10 \
+  --region "$REGION" $EP --no-cli-pager 2>/dev/null || echo "  gps-eventos queue already exists"
 
 echo "[bootstrap] Creating DynamoDB table (last-seen tracking)..."
 aws dynamodb create-table \

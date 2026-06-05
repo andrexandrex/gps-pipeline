@@ -39,7 +39,7 @@ os.environ.setdefault("AWS_ACCESS_KEY_ID",             "test")
 os.environ.setdefault("AWS_SECRET_ACCESS_KEY",         "test")
 os.environ.setdefault("AWS_DEFAULT_REGION",            "us-east-1")
 os.environ.setdefault("AWS_ENDPOINT_URL",              "http://localhost:4566")
-os.environ.setdefault("KINESIS_STREAM_NAME",           "gps-eventos")
+os.environ.setdefault("SQS_GPS_QUEUE_NAME",            "gps-eventos")
 os.environ.setdefault("DYNAMO_TABLE_NAME",             "gps-last-seen")
 os.environ.setdefault("DEDUP_TABLE_NAME",              "gps-dedup")
 os.environ.setdefault("SNS_TOPIC_ARN",                 "arn:aws:sns:us-east-1:000000000000:gps-alertas")
@@ -91,34 +91,32 @@ def generate_gps_events(n: int = 50) -> list[dict]:
     return events
 
 
-def read_kinesis_events(max_records: int = 500) -> list[dict]:
-    """Read pending events from all Kinesis shards."""
-    kinesis = boto3.client("kinesis", **_kw)
-    stream = os.environ["KINESIS_STREAM_NAME"]
-
-    shards = kinesis.describe_stream_summary(StreamName=stream)
-    shard_count = shards["StreamDescriptionSummary"]["OpenShardCount"]
+def read_sqs_events(max_records: int = 500) -> list[dict]:
+    """Read pending messages from the GPS SQS queue (and delete them)."""
+    sqs = boto3.client("sqs", **_kw)
+    queue_name = os.environ.get("SQS_GPS_QUEUE_NAME", "gps-eventos")
+    try:
+        queue_url = os.environ.get("SQS_GPS_QUEUE_URL") or \
+                    sqs.get_queue_url(QueueName=queue_name)["QueueUrl"]
+    except Exception:
+        return []
 
     all_records = []
-    for i in range(shard_count):
-        shard_id = f"shardId-{str(i).zfill(12)}"
-        try:
-            it = kinesis.get_shard_iterator(
-                StreamName=stream, ShardId=shard_id,
-                ShardIteratorType="TRIM_HORIZON"
-            )["ShardIterator"]
-            while it and len(all_records) < max_records:
-                resp = kinesis.get_records(ShardIterator=it, Limit=100)
-                for r in resp["Records"]:
-                    try:
-                        all_records.append(json.loads(r["Data"].decode()))
-                    except Exception:
-                        pass
-                it = resp.get("NextShardIterator")
-                if not resp["Records"]:
-                    break
-        except Exception:
-            pass
+    while len(all_records) < max_records:
+        resp = sqs.receive_message(
+            QueueUrl=queue_url,
+            MaxNumberOfMessages=10,
+            WaitTimeSeconds=1,
+        )
+        messages = resp.get("Messages", [])
+        if not messages:
+            break
+        for msg in messages:
+            try:
+                all_records.append(json.loads(msg["Body"]))
+            except Exception:
+                pass
+            sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=msg["ReceiptHandle"])
     return all_records
 
 
@@ -208,8 +206,8 @@ def main():
         events = generate_gps_events(args.events)
         print(f"  ✓ {len(events)} eventos generados ({int(len(events)*0.1)} inválidos esperados)")
     else:
-        print("[1/4] Leyendo eventos de Kinesis...")
-        events = read_kinesis_events(max_records=500)
+        print("[1/4] Leyendo eventos de SQS...")
+        events = read_sqs_events(max_records=500)
         if not events:
             print("  ⚠ No hay eventos en Kinesis. Usa --generate para crear eventos de prueba.")
             print("    O corre el producer en otra terminal:")

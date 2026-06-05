@@ -1,6 +1,6 @@
 """
 Lambda: validate_gps
-Trigger: Kinesis Data Streams (event source mapping)
+Trigger: SQS (event source mapping) — also accepts Kinesis format for backwards compat
 
 Per record:
   1. Decode base64 payload → JSON
@@ -77,7 +77,10 @@ def _normalize_fields(record: dict) -> dict:
 # ── Validation ───────────────────────────────────────────────────────────────
 
 def _decode(raw: dict) -> dict:
-    return json.loads(base64.b64decode(raw["kinesis"]["data"]))
+    """Decode SQS or Kinesis event record to a dict."""
+    if "kinesis" in raw:
+        return json.loads(base64.b64decode(raw["kinesis"]["data"]))
+    return json.loads(raw["body"])
 
 
 def _validate(rec: dict) -> tuple[bool, str]:

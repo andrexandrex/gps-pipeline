@@ -34,12 +34,15 @@ python3.12 -m pip install --quiet -r requirements.txt
 
 # ── 4. Create .env for real AWS (no endpoint, uses IAM role from EC2 profile) ─
 echo "[4/5] Creating .env for real AWS..."
+# Bucket names include account ID suffix for global uniqueness
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "unknown")
 cat > .env << EOF
 # Real AWS — no AWS_ENDPOINT_URL (boto3 uses IAM role from EC2 instance profile)
 AWS_DEFAULT_REGION=${REGION}
-SILVER_BUCKET=gps-silver
-GOLD_BUCKET=gps-gold
-BRONZE_BUCKET=gps-bronze
+SILVER_BUCKET=gps-silver-${ACCOUNT_ID}
+GOLD_BUCKET=gps-gold-${ACCOUNT_ID}
+BRONZE_BUCKET=gps-bronze-${ACCOUNT_ID}
+SQS_GPS_QUEUE_NAME=gps-eventos
 DYNAMO_TABLE_NAME=gps-last-seen
 SIGNAL_LOSS_THRESHOLD_MINUTES=10
 AUTO_MAINTENANCE_THRESHOLD_MINUTES=30

@@ -1,5 +1,5 @@
 """
-GPS event simulator — publishes synthetic Kinesis records for Áncash, Perú.
+GPS event simulator — publishes synthetic SQS messages for Áncash, Perú.
 Injects ~10% invalid records (bad coords / future ts) to exercise validation.
 
 Run:
@@ -61,21 +61,29 @@ def _make_invalid_event(equipo_id: str) -> dict:
     return event
 
 
-def _kinesis_client() -> boto3.client:
+def _sqs_client():
     kwargs = {}
     if ep := os.getenv("AWS_ENDPOINT_URL"):
         kwargs["endpoint_url"] = ep
-    return boto3.client("kinesis", **kwargs)
+    return boto3.client("sqs", **kwargs)
+
+
+def _get_queue_url(sqs) -> str:
+    url = os.getenv("SQS_GPS_QUEUE_URL", "")
+    if url:
+        return url
+    queue_name = os.getenv("SQS_GPS_QUEUE_NAME", "gps-eventos")
+    return sqs.get_queue_url(QueueName=queue_name)["QueueUrl"]
 
 
 def main() -> None:
-    kinesis = _kinesis_client()
-    stream_name = os.getenv("KINESIS_STREAM_NAME", "gps-eventos")
+    sqs = _sqs_client()
+    queue_url = _get_queue_url(sqs)
     interval = float(os.getenv("PRODUCER_INTERVAL_SECONDS", "5"))
     invalid_ratio = float(os.getenv("PRODUCER_INVALID_RATIO", "0.1"))
 
     logger.info("Producer started", extra={
-        "stream": stream_name,
+        "queue": queue_url,
         "equipos": len(EQUIPOS),
         "interval_s": interval,
         "invalid_ratio": invalid_ratio,
@@ -88,20 +96,18 @@ def main() -> None:
                 if random.random() < invalid_ratio
                 else _make_valid_event(equipo_id)
             )
-            partition_key = event.get("equipo_id", equipo_id)  # fallback if field deleted
             try:
-                resp = kinesis.put_record(
-                    StreamName=stream_name,
-                    Data=json.dumps(event).encode(),
-                    PartitionKey=partition_key,
+                resp = sqs.send_message(
+                    QueueUrl=queue_url,
+                    MessageBody=json.dumps(event),
                 )
                 logger.info("Record published", extra={
-                    "equipo_id": partition_key,
-                    "shard": resp["ShardId"],
+                    "equipo_id": event.get("equipo_id", equipo_id),
+                    "message_id": resp["MessageId"],
                     "fault": event.get("_injected_fault", "none"),
                 })
             except Exception:
-                logger.exception("Failed to publish", extra={"equipo_id": partition_key})
+                logger.exception("Failed to publish", extra={"equipo_id": equipo_id})
         time.sleep(interval)
 
 

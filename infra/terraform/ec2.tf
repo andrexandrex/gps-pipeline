@@ -38,9 +38,9 @@ resource "aws_iam_role_policy" "dashboard_ec2_policy" {
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:ListBucket"]
         Resource = [
-          "arn:aws:s3:::gps-silver", "arn:aws:s3:::gps-silver/*",
-          "arn:aws:s3:::gps-gold",   "arn:aws:s3:::gps-gold/*",
-          "arn:aws:s3:::gps-bronze", "arn:aws:s3:::gps-bronze/*",
+          aws_s3_bucket.silver.arn, "${aws_s3_bucket.silver.arn}/*",
+          aws_s3_bucket.gold.arn,   "${aws_s3_bucket.gold.arn}/*",
+          aws_s3_bucket.bronze.arn, "${aws_s3_bucket.bronze.arn}/*",
         ]
       },
       # DynamoDB: scan last-seen table

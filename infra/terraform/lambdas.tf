@@ -59,6 +59,7 @@ resource "aws_lambda_function" "validate_gps" {
       SNS_TOPIC_ARN                 = aws_sns_topic.alertas.arn
       SILVER_BUCKET                 = aws_s3_bucket.silver.bucket
       BRONZE_BUCKET                 = aws_s3_bucket.bronze.bucket
+      SQS_GPS_QUEUE_URL             = aws_sqs_queue.gps_eventos.url
       SIGNAL_LOSS_THRESHOLD_MINUTES = "10"
       LOG_LEVEL                     = "INFO"
     }
@@ -69,22 +70,15 @@ resource "aws_lambda_function" "validate_gps" {
   }
 }
 
-# ── Kinesis → validate_gps trigger ──────────────────────────────────────────
-resource "aws_lambda_event_source_mapping" "kinesis_to_validate" {
-  event_source_arn                   = aws_kinesis_stream.gps_eventos.arn
+# ── SQS → validate_gps trigger ───────────────────────────────────────────────
+resource "aws_lambda_event_source_mapping" "sqs_to_validate" {
+  event_source_arn                   = aws_sqs_queue.gps_eventos.arn
   function_name                      = aws_lambda_function.validate_gps.arn
-  starting_position                  = "TRIM_HORIZON"
-  batch_size                         = 100
-  maximum_batching_window_in_seconds = 10
+  batch_size                         = 10
+  maximum_batching_window_in_seconds = 5
 
-  # On error: retry 2x, then split batch to isolate bad record
-  maximum_retry_attempts         = 2
-  bisect_batch_on_function_error = true
-
-  destination_config {
-    on_failure {
-      destination_arn = aws_sqs_queue.validate_dlq.arn
-    }
+  scaling_config {
+    maximum_concurrency = 5  # cap concurrency so DynamoDB/S3 aren't overwhelmed
   }
 }
 

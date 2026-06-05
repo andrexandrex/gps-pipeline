@@ -26,7 +26,10 @@ variable "aws_account_id" {
 }
 
 locals {
-  endpoint = var.use_localstack ? "http://localhost:4566" : null
+  endpoint      = var.use_localstack ? "http://localhost:4566" : null
+  # S3 bucket names must be globally unique — append account ID on real AWS.
+  # LocalStack keeps the short names (no suffix) so bootstrap.sh stays simple.
+  bucket_suffix = var.use_localstack ? "" : "-${var.aws_account_id}"
 }
 
 provider "aws" {
@@ -58,17 +61,17 @@ provider "aws" {
 
 # ── S3 Medallion buckets ────────────────────────────────────────────────────
 resource "aws_s3_bucket" "bronze" {
-  bucket        = "gps-bronze"
+  bucket        = "gps-bronze${local.bucket_suffix}"
   force_destroy = true
 }
 
 resource "aws_s3_bucket" "silver" {
-  bucket        = "gps-silver"
+  bucket        = "gps-silver${local.bucket_suffix}"
   force_destroy = true
 }
 
 resource "aws_s3_bucket" "gold" {
-  bucket        = "gps-gold"
+  bucket        = "gps-gold${local.bucket_suffix}"
   force_destroy = true
 }
 
@@ -77,11 +80,15 @@ resource "aws_s3_bucket_versioning" "bronze_versioning" {
   versioning_configuration { status = "Enabled" }
 }
 
-# ── Kinesis stream ──────────────────────────────────────────────────────────
-resource "aws_kinesis_stream" "gps_eventos" {
-  name        = "gps-eventos"
-  shard_count = 2
-  # 2 shards = ~2 MB/s ingest; scale up for >1000 vehicles
+# ── SQS queue: GPS events ingestion ─────────────────────────────────────────
+# SQS Standard Queue replaces Kinesis Data Streams as the GPS event bus.
+# Functionally equivalent for this workload: Lambda ESM, DLQ on failure,
+# at-least-once delivery. SQS has no service subscription requirement.
+resource "aws_sqs_queue" "gps_eventos" {
+  name                       = "gps-eventos"
+  message_retention_seconds  = 86400   # 1 day — GPS data is stale quickly
+  visibility_timeout_seconds = 120     # must be >= Lambda timeout (60s)
+  receive_wait_time_seconds  = 10      # long polling — reduces empty receives
 }
 
 # ── DynamoDB: last-seen per device ──────────────────────────────────────────

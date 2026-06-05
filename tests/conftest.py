@@ -18,6 +18,7 @@ _DEFAULTS = {
     "AWS_SECRET_ACCESS_KEY":         "test",
     "AWS_DEFAULT_REGION":            "us-east-1",
     "AWS_ENDPOINT_URL":              "http://localhost:4566",
+    "SQS_GPS_QUEUE_NAME":            "gps-eventos",
     "DYNAMO_TABLE_NAME":             "gps-last-seen",
     "DEDUP_TABLE_NAME":              "gps-dedup",
     "SNS_TOPIC_ARN":                 "arn:aws:sns:us-east-1:000000000000:gps-alertas",

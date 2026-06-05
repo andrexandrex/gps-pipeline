@@ -46,22 +46,22 @@ resource "aws_cloudwatch_metric_alarm" "detect_signal_loss_errors" {
   }
 }
 
-# Kinesis IteratorAge — key metric: if this rises, the consumer is falling behind
-resource "aws_cloudwatch_metric_alarm" "kinesis_iterator_age" {
-  alarm_name          = "kinesis-gps-iterator-age"
+# SQS message age — equivalent to Kinesis IteratorAge; rises when consumer lags
+resource "aws_cloudwatch_metric_alarm" "gps_sqs_message_age" {
+  alarm_name          = "gps-eventos-message-age"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
-  metric_name         = "GetRecords.IteratorAgeMilliseconds"
-  namespace           = "AWS/Kinesis"
+  metric_name         = "ApproximateAgeOfOldestMessage"
+  namespace           = "AWS/SQS"
   period              = 60
-  extended_statistic  = "p99"
-  threshold           = 60000 # 60 seconds — Lambda is >1 min behind
-  alarm_description   = "Kinesis consumer >60s behind — validate_gps may be throttled or erroring"
+  statistic           = "Maximum"
+  threshold           = 60  # seconds — consumer >1 min behind
+  alarm_description   = "GPS SQS queue oldest message >60s — validate_gps may be throttled or erroring"
   alarm_actions       = local.alarm_actions
   treat_missing_data  = "notBreaching"
 
   dimensions = {
-    StreamName = aws_kinesis_stream.gps_eventos.name
+    QueueName = aws_sqs_queue.gps_eventos.name
   }
 }
 
