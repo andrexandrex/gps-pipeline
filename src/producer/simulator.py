@@ -24,17 +24,21 @@ logger = get_logger("producer")
 # Áncash, Perú — approximate bounding box
 ANCASH = {"lat": (-10.5, -7.8), "lon": (-78.5, -76.5)}
 
-EQUIPOS = [f"EQ{str(i).zfill(3)}" for i in range(1, 11)]  # 10 devices
+# Equipo IDs match the PDF format: CAM_001, CAM_002, ...
+EQUIPOS = [f"CAM_{str(i).zfill(3)}" for i in range(1, 11)]
+ESTADOS = ["ACTIVO", "EN_RUTA", "DETENIDO"]
 
 
 def _make_valid_event(equipo_id: str) -> dict:
+    # Field names match the PDF GPS event schema exactly:
+    # latitud, longitud, velocidad, estado — normalized to English in the Lambda
     return {
         "equipo_id": equipo_id,
-        "latitude": round(random.uniform(*ANCASH["lat"]), 6),
-        "longitude": round(random.uniform(*ANCASH["lon"]), 6),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "speed_kmh": round(random.uniform(0, 120), 1),
-        "heading": round(random.uniform(0, 360), 1),
+        "timestamp":  datetime.now(timezone.utc).isoformat(),
+        "latitud":    round(random.uniform(*ANCASH["lat"]), 6),
+        "longitud":   round(random.uniform(*ANCASH["lon"]), 6),
+        "velocidad":  round(random.uniform(0, 120), 1),
+        "estado":     random.choice(ESTADOS),
     }
 
 
@@ -43,10 +47,10 @@ def _make_invalid_event(equipo_id: str) -> dict:
     fault = random.choice(["bad_lat", "bad_lon", "future_ts", "missing_field"])
     event = _make_valid_event(equipo_id)
     if fault == "bad_lat":
-        event["latitude"] = round(random.uniform(10, 90), 6)   # outside Perú
+        event["latitud"] = round(random.uniform(10, 90), 6)   # outside Perú
         event["_injected_fault"] = "bad_lat"
     elif fault == "bad_lon":
-        event["longitude"] = round(random.uniform(-60, -40), 6)
+        event["longitud"] = round(random.uniform(-60, -40), 6)
         event["_injected_fault"] = "bad_lon"
     elif fault == "future_ts":
         event["timestamp"] = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()

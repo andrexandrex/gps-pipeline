@@ -24,13 +24,12 @@ def _csv_bytes(rows: list[dict]) -> bytes:
 
 
 def _good_rows() -> list[dict]:
+    # PDF format: equipo_id, fecha (not fecha_mantenimiento), tipo_falla, criticidad
     return [
-        {"equipo_id": "EQ001", "fecha_mantenimiento": "2024-01-15",
-         "tipo_falla": "CRITICA", "descripcion": "Motor averiado",
-         "tecnico": "Lopez", "estado": "RESUELTO"},
-        {"equipo_id": "EQ002", "fecha_mantenimiento": "2024-02-20",
-         "tipo_falla": "MENOR", "descripcion": "Cambio aceite",
-         "tecnico": "Martinez", "estado": "PENDIENTE"},
+        {"equipo_id": "CAM_001", "fecha": "2026-05-20",
+         "tipo_falla": "Falla Motor", "criticidad": "ALTA"},
+        {"equipo_id": "CAM_002", "fecha": "2026-04-10",
+         "tipo_falla": "Cambio aceite", "criticidad": "BAJA"},
     ]
 
 
@@ -41,30 +40,39 @@ def _s3_event(bucket: str, key: str) -> dict:
 # ── Unit tests (no AWS) ───────────────────────────────────────────────────────
 
 class TestNormalize:
-    def test_uppercase_fields(self):
+    def test_renames_fecha_to_fecha_mantenimiento(self):
         from batch.ingest_maintenance import _normalize
         df = pd.DataFrame([{
-            "equipo_id": "eq001", "tipo_falla": "critica",
-            "estado": "resuelto", "fecha_mantenimiento": "2024-01-15",
+            "equipo_id": "CAM_001", "fecha": "2026-05-20",
+            "tipo_falla": "Falla Motor", "criticidad": "alta",
         }])
         result = _normalize(df)
-        assert result.loc[0, "equipo_id"] == "EQ001"
-        assert result.loc[0, "tipo_falla"] == "CRITICA"
-        assert result.loc[0, "estado"] == "RESUELTO"
+        assert "fecha_mantenimiento" in result.columns
+        assert "fecha" not in result.columns
+
+    def test_uppercase_criticidad(self):
+        from batch.ingest_maintenance import _normalize
+        df = pd.DataFrame([{
+            "equipo_id": "cam_001", "fecha": "2026-05-20",
+            "tipo_falla": "Falla Motor", "criticidad": "alta",
+        }])
+        result = _normalize(df)
+        assert result.loc[0, "criticidad"] == "ALTA"
+        assert result.loc[0, "equipo_id"] == "CAM_001"
 
     def test_date_normalization(self):
         from batch.ingest_maintenance import _normalize
-        df = pd.DataFrame([{"equipo_id": "EQ001", "tipo_falla": "CRITICA",
-                             "estado": "RESUELTO", "fecha_mantenimiento": "15/01/2024"}])
+        df = pd.DataFrame([{"equipo_id": "CAM_001", "fecha": "20/05/2026",
+                             "tipo_falla": "Falla Motor", "criticidad": "ALTA"}])
         result = _normalize(df)
-        assert result.loc[0, "fecha_mantenimiento"] == "2024-01-15"
+        assert result.loc[0, "fecha_mantenimiento"] == "2026-05-20"
 
     def test_strips_whitespace(self):
         from batch.ingest_maintenance import _normalize
-        df = pd.DataFrame([{"equipo_id": "  EQ001  ", "tipo_falla": " CRITICA ",
-                             "estado": "RESUELTO", "fecha_mantenimiento": "2024-01-15"}])
+        df = pd.DataFrame([{"equipo_id": "  CAM_001  ", "fecha": "2026-05-20",
+                             "tipo_falla": "Falla Motor", "criticidad": "ALTA"}])
         result = _normalize(df)
-        assert result.loc[0, "equipo_id"] == "EQ001"
+        assert result.loc[0, "equipo_id"] == "CAM_001"
 
 
 class TestValidateRows:
@@ -75,15 +83,15 @@ class TestValidateRows:
         assert len(valid) == 2
         assert len(rejected) == 0
 
-    def test_invalid_tipo_falla_rejected(self):
+    def test_invalid_criticidad_rejected(self):
         from batch.ingest_maintenance import _normalize, _validate_rows
         rows = _good_rows()
-        rows[0]["tipo_falla"] = "URGENTE"   # not in VALID_FALLAS
+        rows[0]["criticidad"] = "URGENTE"   # not in VALID_CRITICIDAD
         df = _normalize(pd.DataFrame(rows))
         valid, rejected = _validate_rows(df)
         assert len(valid) == 1
         assert len(rejected) == 1
-        assert "invalid_tipo_falla" in rejected.iloc[0]["rejection_reason"]
+        assert "invalid_criticidad" in rejected.iloc[0]["rejection_reason"]
 
     def test_missing_equipo_id_rejected(self):
         from batch.ingest_maintenance import _normalize, _validate_rows
@@ -97,7 +105,7 @@ class TestValidateRows:
     def test_invalid_date_rejected(self):
         from batch.ingest_maintenance import _normalize, _validate_rows
         rows = _good_rows()
-        rows[0]["fecha_mantenimiento"] = "not-a-date"
+        rows[0]["fecha"] = "not-a-date"
         df = _normalize(pd.DataFrame(rows))
         valid, rejected = _validate_rows(df)
         assert len(rejected) == 1
@@ -161,7 +169,7 @@ class TestIntegrationBatch:
         s3 = boto3.client("s3", **kw)
 
         rows = _good_rows()
-        rows[0]["tipo_falla"] = "INVALIDA"
+        rows[0]["criticidad"] = "URGENTE"   # invalid — triggers rejection
         key = "mantenimientos/test_partial.csv"
         self._upload_csv(s3, rows, key)
 

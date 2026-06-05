@@ -57,13 +57,15 @@ def _kinesis_event(records: list[dict]) -> dict:
     }
 
 
-def _good_record(equipo_id: str = "EQ001") -> dict:
+def _good_record(equipo_id: str = "CAM_001") -> dict:
+    # PDF field names — handler normalizes latitud→latitude etc.
     return {
         "equipo_id": equipo_id,
-        "latitude": -9.1,
-        "longitude": -77.5,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "speed_kmh": 60.0,
+        "latitud":   -9.1,
+        "longitud":  -77.5,
+        "velocidad": 60.0,
+        "estado":    "ACTIVO",
     }
 
 

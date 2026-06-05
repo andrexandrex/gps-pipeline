@@ -31,8 +31,9 @@ from common.logger import get_logger
 
 logger = get_logger("ingest_maintenance")
 
-VALID_FALLAS  = {"CRITICA", "MENOR"}
-VALID_ESTADOS = {"RESUELTO", "PENDIENTE", "EN_PROCESO"}
+# PDF maintenance CSV uses 'criticidad' as severity (ALTA/MEDIA/BAJA).
+# 'tipo_falla' in the PDF is a free-text failure description, not a category.
+VALID_CRITICIDAD = {"ALTA", "MEDIA", "BAJA"}
 
 _s3: Optional[boto3.client] = None
 
@@ -49,17 +50,18 @@ def _s3_client() -> boto3.client:
 
 def _normalize(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    for col in ("equipo_id", "tipo_falla", "estado"):
+    # PDF field 'fecha' → internal canonical name 'fecha_mantenimiento'
+    if "fecha" in df.columns and "fecha_mantenimiento" not in df.columns:
+        df = df.rename(columns={"fecha": "fecha_mantenimiento"})
+    for col in ("equipo_id", "criticidad"):
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip().str.upper()
+    if "tipo_falla" in df.columns:
+        df["tipo_falla"] = df["tipo_falla"].astype(str).str.strip()
     if "fecha_mantenimiento" in df.columns:
         df["fecha_mantenimiento"] = pd.to_datetime(
-            df["fecha_mantenimiento"], errors="coerce"
+            df["fecha_mantenimiento"], format="mixed", errors="coerce"
         ).dt.strftime("%Y-%m-%d")
-    if "descripcion" in df.columns:
-        df["descripcion"] = df["descripcion"].astype(str).str.strip()
-    if "tecnico" in df.columns:
-        df["tecnico"] = df["tecnico"].astype(str).str.strip()
     return df
 
 
@@ -67,18 +69,21 @@ def _validate_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Returns (valid_df, rejected_df). Adds rejection_reason column to rejected."""
     reasons = pd.Series([""] * len(df), index=df.index)
 
-    # pandas converts None → "nan"/"None" depending on dtype; catch all variants
     _NULL = {"NAN", "NONE", "NULL", "NA", ""}
     missing_equipo = df["equipo_id"].isna() | df["equipo_id"].isin(_NULL)
     reasons[missing_equipo] += "missing_equipo_id;"
 
-    invalid_falla = ~df["tipo_falla"].isin(VALID_FALLAS)
-    reasons[invalid_falla] += "invalid_tipo_falla:" + df.loc[invalid_falla, "tipo_falla"].fillna("null") + ";"
+    # criticidad is the severity field per PDF (ALTA/MEDIA/BAJA)
+    if "criticidad" in df.columns:
+        invalid_crit = ~df["criticidad"].isin(VALID_CRITICIDAD)
+        reasons[invalid_crit] += "invalid_criticidad:" + df.loc[invalid_crit, "criticidad"].fillna("null") + ";"
+    else:
+        invalid_crit = pd.Series(False, index=df.index)
 
     invalid_fecha = df["fecha_mantenimiento"].isna() | (df["fecha_mantenimiento"] == "NaT")
     reasons[invalid_fecha] += "invalid_fecha_mantenimiento;"
 
-    invalid_mask = missing_equipo | invalid_falla | invalid_fecha
+    invalid_mask = missing_equipo | invalid_crit | invalid_fecha
 
     valid_df = df[~invalid_mask].copy()
     rejected_df = df[invalid_mask].copy()
@@ -146,7 +151,11 @@ def handler(event: dict, context) -> dict:
             logger.error("Failed to parse CSV", extra={"key": src_key, "error": str(exc)})
             raise
 
-        required_cols = {"equipo_id", "fecha_mantenimiento", "tipo_falla"}
+        # Accept both PDF format ('fecha') and internal name ('fecha_mantenimiento')
+        required_cols = {"equipo_id", "tipo_falla"}
+        fecha_present = {"fecha", "fecha_mantenimiento"} & set(df.columns)
+        if not fecha_present:
+            required_cols.add("fecha")   # will trigger the missing-cols error below
         missing_cols  = required_cols - set(df.columns)
         if missing_cols:
             logger.error("Missing required columns", extra={"key": src_key, "missing": list(missing_cols)})

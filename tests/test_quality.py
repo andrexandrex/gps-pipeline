@@ -18,13 +18,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "lambdas
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _gps_df(overrides: dict | None = None) -> pd.DataFrame:
+    # Post-normalization GPS records (latitud→latitude already mapped)
     rows = [
-        {"equipo_id": "EQ001", "latitude": -9.1,  "longitude": -77.5,
-         "timestamp": datetime.now(timezone.utc).isoformat(), "speed_kmh": 60.0},
-        {"equipo_id": "EQ002", "latitude": -9.5,  "longitude": -77.0,
-         "timestamp": datetime.now(timezone.utc).isoformat(), "speed_kmh": 80.0},
-        {"equipo_id": "EQ003", "latitude": -8.0,  "longitude": -76.6,
-         "timestamp": datetime.now(timezone.utc).isoformat(), "speed_kmh": 30.0},
+        {"equipo_id": "CAM_001", "latitude": -9.1,  "longitude": -77.5,
+         "timestamp": datetime.now(timezone.utc).isoformat(), "speed_kmh": 60.0, "estado": "ACTIVO"},
+        {"equipo_id": "CAM_002", "latitude": -9.5,  "longitude": -77.0,
+         "timestamp": datetime.now(timezone.utc).isoformat(), "speed_kmh": 80.0, "estado": "EN_RUTA"},
+        {"equipo_id": "CAM_003", "latitude": -8.0,  "longitude": -76.6,
+         "timestamp": datetime.now(timezone.utc).isoformat(), "speed_kmh": 30.0, "estado": "DETENIDO"},
     ]
     df = pd.DataFrame(rows)
     if overrides:
@@ -34,11 +35,12 @@ def _gps_df(overrides: dict | None = None) -> pd.DataFrame:
 
 
 def _mant_df(overrides: dict | None = None) -> pd.DataFrame:
+    # Normalized maintenance records (fecha→fecha_mantenimiento, criticidad added)
     rows = [
-        {"equipo_id": "EQ001", "fecha_mantenimiento": "2024-01-15",
-         "tipo_falla": "CRITICA", "estado": "RESUELTO"},
-        {"equipo_id": "EQ002", "fecha_mantenimiento": "2024-02-20",
-         "tipo_falla": "MENOR",   "estado": "PENDIENTE"},
+        {"equipo_id": "CAM_001", "fecha_mantenimiento": "2026-05-20",
+         "tipo_falla": "Falla Motor", "criticidad": "ALTA"},
+        {"equipo_id": "CAM_002", "fecha_mantenimiento": "2026-04-10",
+         "tipo_falla": "Cambio aceite", "criticidad": "BAJA"},
     ]
     df = pd.DataFrame(rows)
     if overrides:
@@ -96,9 +98,9 @@ class TestMantSchema:
         valid_df, rejected_df, metrics = validate(_mant_df(), "mantenimientos")
         assert metrics["valid_pct"] == 100.0
 
-    def test_invalid_tipo_falla_rejected(self):
+    def test_invalid_criticidad_rejected(self):
         from quality.checker import validate
-        df = _mant_df({"tipo_falla": "URGENTE"})
+        df = _mant_df({"criticidad": "URGENTE"})   # not in ALTA/MEDIA/BAJA
         _, rejected_df, _ = validate(df, "mantenimientos")
         assert len(rejected_df) == 1
 

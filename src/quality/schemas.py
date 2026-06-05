@@ -51,7 +51,9 @@ GPS_SCHEMA = DataFrameSchema(
 # Deduplication key for GPS: same device at the same second = duplicate
 GPS_DEDUP_KEYS = ["equipo_id", "timestamp"]
 
-# ── Mantenimientos schema ────────────────────────────────────────────────────
+# ── Mantenimientos schema ─────────────────────────────────────────────────────
+# Matches PDF CSV: equipo_id, fecha (→ fecha_mantenimiento after normalization),
+# tipo_falla (free-text description), criticidad (severity: ALTA/MEDIA/BAJA)
 MANT_SCHEMA = DataFrameSchema(
     columns={
         "equipo_id": Column(
@@ -66,13 +68,14 @@ MANT_SCHEMA = DataFrameSchema(
         ),
         "tipo_falla": Column(
             str,
-            nullable=False,
-            checks=Check.isin(["CRITICA", "MENOR"]),
-        ),
-        "estado": Column(
-            str,
             nullable=True,
-            checks=Check.isin(["RESUELTO", "PENDIENTE", "EN_PROCESO"]),
+            # free-text description — only length-bounded, not enum
+            checks=Check.str_length(max_value=200),
+        ),
+        "criticidad": Column(
+            str,
+            nullable=False,
+            checks=Check.isin(["ALTA", "MEDIA", "BAJA"]),
         ),
     },
     coerce=True,

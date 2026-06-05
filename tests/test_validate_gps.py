@@ -19,12 +19,14 @@ from lambdas.validate_gps.handler import _validate, _decode
 # ── _validate ────────────────────────────────────────────────────────────────
 
 def _good() -> dict:
+    # Post-normalization record (latitud→latitude, longitud→longitude done by handler)
     return {
-        "equipo_id": "EQ001",
-        "latitude": -9.1,
+        "equipo_id": "CAM_001",
+        "latitude":  -9.1,
         "longitude": -77.5,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "speed_kmh": 60.0,
+        "estado":    "ACTIVO",
     }
 
 
@@ -106,8 +108,21 @@ def test_boundary_lat_max_accepted():
 # ── _decode ──────────────────────────────────────────────────────────────────
 
 def test_decode_kinesis_record():
-    payload = {"equipo_id": "EQ001", "latitude": -9.0, "longitude": -77.0}
+    # Decode should return raw PDF field names; normalization happens in handler
+    payload = {"equipo_id": "CAM_001", "latitud": -9.0, "longitud": -77.0}
     encoded = base64.b64encode(json.dumps(payload).encode()).decode()
     raw = {"kinesis": {"data": encoded}}
     result = _decode(raw)
-    assert result["equipo_id"] == "EQ001"
+    assert result["equipo_id"] == "CAM_001"
+    assert "latitud" in result   # raw, not yet normalized
+
+
+def test_normalize_fields():
+    from lambdas.validate_gps.handler import _normalize_fields
+    raw = {"equipo_id": "CAM_001", "latitud": -9.0, "longitud": -77.5,
+           "velocidad": 60.0, "estado": "ACTIVO", "timestamp": "2024-01-01T00:00:00Z"}
+    normalized = _normalize_fields(raw)
+    assert "latitude"  in normalized and "latitud"   not in normalized
+    assert "longitude" in normalized and "longitud"  not in normalized
+    assert "speed_kmh" in normalized and "velocidad" not in normalized
+    assert normalized["estado"] == "ACTIVO"   # passthrough unchanged

@@ -1,13 +1,14 @@
-equipo_id,fecha_mantenimiento,tipo_falla,descripcion,tecnico,estado
-EQ001,2024-01-15,CRITICA,Motor recalentado,Lopez Juan,RESUELTO
-EQ001,2024-02-20,CRITICA,Falla hidraulica,Lopez Juan,RESUELTO
-EQ001,2024-03-10,CRITICA,Sensor GPS dañado,Martinez Ana,PENDIENTE
-EQ001,2024-04-05,MENOR,Cambio de aceite,Lopez Juan,RESUELTO
-EQ002,2024-01-08,CRITICA,Frenos desgastados,Gomez Pedro,RESUELTO
-EQ002,2024-02-14,MENOR,Revision general,Martinez Ana,RESUELTO
-EQ003,2024-01-22,CRITICA,Transmision averiada,Lopez Juan,RESUELTO
-EQ003,2024-02-28,CRITICA,Bateria descargada,Gomez Pedro,RESUELTO
-EQ003,2024-03-15,CRITICA,Falla electrica,Martinez Ana,EN_PROCESO
-EQ003,2024-04-01,MENOR,Limpieza filtros,Lopez Juan,RESUELTO
-EQ004,2024-02-10,MENOR,Calibracion sensores,Martinez Ana,RESUELTO
-EQ005,2024-01-30,CRITICA,Neumatico pinchado,Gomez Pedro,RESUELTO
+equipo_id,fecha,tipo_falla,criticidad
+CAM_001,2026-05-20,Falla Motor,ALTA
+CAM_001,2026-04-10,Falla Hidraulica,ALTA
+CAM_001,2026-03-05,Sensor GPS dañado,ALTA
+CAM_001,2026-02-15,Falla Electrica,ALTA
+CAM_002,2026-05-18,Frenos desgastados,ALTA
+CAM_002,2026-04-22,Cambio de aceite,BAJA
+CAM_003,2026-05-15,Transmision averiada,ALTA
+CAM_003,2026-04-30,Bateria descargada,ALTA
+CAM_003,2026-03-20,Falla electrica,ALTA
+CAM_003,2026-03-01,Revision general,MEDIA
+CAM_003,2026-02-10,Limpieza filtros,BAJA
+CAM_004,2026-05-12,Calibracion sensores,MEDIA
+CAM_005,2026-05-25,Neumatico pinchado,ALTA

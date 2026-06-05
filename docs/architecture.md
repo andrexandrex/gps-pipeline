@@ -17,7 +17,7 @@ flowchart TD
         DYNAMO["DynamoDB\ngps-last-seen\nÚltimo timestamp\npor equipo_id"]
         SLAMBDA["λ detect_signal_loss\nEventBridge cada 5 min\nCompara now() vs last_seen"]
         SNS["SNS\ngps-alertas\nAlerta pérdida >10 min"]
-        BRONZE_GPS["S3 Bronze\ngps-bronze/gps_eventos/\nyyyy/mm/dd/\n(Parquet vía Firehose)"]
+        BRONZE_GPS["S3 Bronze\ngps-bronze/bronze_rejected/\nregistros inválidos\n(NDJSON)"]
     end
 
     subgraph BATCH["Camino Batch — diario"]
@@ -44,12 +44,12 @@ flowchart TD
     end
 
     %% Streaming flow
-    SIM -->|"PutRecord boto3"| KDS
+    SIM -->|"PutRecord boto3\n(latitud/longitud/velocidad)"| KDS
     KDS -->|"Event source mapping"| VLAMBDA
-    VLAMBDA -->|"Registro válido → Firehose"| BRONZE_GPS
-    VLAMBDA -->|"Registro inválido"| DLQ
+    VLAMBDA -->|"Válido → Parquet directo"| SILVER_GPS
+    VLAMBDA -->|"Inválido → NDJSON"| BRONZE_GPS
+    VLAMBDA -->|"Inválido → DLQ"| DLQ
     VLAMBDA -->|"UpdateItem last_seen"| DYNAMO
-    BRONZE_GPS -->|"Glue Crawler"| SILVER_GPS
     SILVER_GPS --> GLUE_CAT
 
     %% Signal loss detection

@@ -58,6 +58,22 @@ def _s3_client() -> boto3.client:
     return _s3
 
 
+# ── Field normalization (PDF → internal canonical names) ─────────────────────
+# The GPS device emits Spanish field names per the PDF spec.
+# We normalize here at the ingestion boundary so all downstream code
+# (validation, Pandera, Athena) uses consistent English names.
+_FIELD_MAP = {
+    "latitud":   "latitude",
+    "longitud":  "longitude",
+    "velocidad": "speed_kmh",
+    # equipo_id and timestamp keep their names; estado is passed through
+}
+
+
+def _normalize_fields(record: dict) -> dict:
+    return {_FIELD_MAP.get(k, k): v for k, v in record.items()}
+
+
 # ── Validation ───────────────────────────────────────────────────────────────
 
 def _decode(raw: dict) -> dict:
@@ -169,7 +185,7 @@ def handler(event: dict, context) -> dict:
 
     for raw in raw_records:
         try:
-            rec = _decode(raw)
+            rec = _normalize_fields(_decode(raw))
         except Exception as exc:
             logger.error("Decode error", extra={"error": str(exc)})
             rejected.append({"_raw": str(raw)[:500], "rejection_reason": f"decode_error:{exc}"})
